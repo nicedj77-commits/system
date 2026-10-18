@@ -1,34 +1,1220 @@
-do -- ESP (v7 rewrite: one Entry object per player, same visuals and same Config keys)
-	-- Replaces the whole old `do -- ESP ... end` block. Nothing else in the script needs to change:
-	-- the ESP tab, config import/export and the aimlock's red target colour all use the same names.
+--[[
+	Flight Status Menu (System Edition)  -  v6 (advanced flight + merged MOVE panel)
+	LocalScript. Place in StarterPlayer > StarterPlayerScripts.
+
+	Layout
+		Left sidebar tabs: STATUS, MOVE, WORLD, ESP, AIM, LIST, MISC, CONFIG, SETTINGS, EXTRAS, INTERFACE
+		Drag the window by its header. Close with X, reopen with the MENU tab or the menu key.
+		Tabs with more content than fits scroll with the mouse wheel.
+
+	Controls
+		F                  Toggle flight (rebindable)
+		RightShift         Show or hide the menu (rebindable)
+		W A S D            Move relative to the camera
+		Space / Left Ctrl  Ascend / descend (rebindable, MOVE tab)
+		Left Shift         Boost while held (also the sprint key)
+		Q                  Hold to aimlock, or press to toggle (rebindable, AIM tab; AIMLOCK must be on)
+		Z                  Hold to zoom (rebindable, MOVE tab; ZOOM must be on)
+		Left Alt + Click   Click teleport (rebindable, MOVE tab; CLICK TP must be on)
+		E                  Dash (MOVE tab; DASH must be on)
+		N / B / J          Noclip / Fullbright / ESP hotkeys (EXTRAS tab; HOTKEYS must be on)
+		Delete             Panic: reset all settings and hide the menu
+
+	v6 additions
+		MOVE tab: flight, walking, camera and every movement key now live in one panel.
+		ADVANCED FLIGHT: PLANAR, CRUISE, FLY NOCLIP, WHEEL SPEED, BANK TILT, separate BRAKING.
+		ANTI OVERRIDE: the flight rig is rebuilt if another script removes it, the humanoid state and
+		anchoring are re-asserted every Heartbeat, velocity is written directly as a fallback, and the
+		fly key still works when another binding sinks the key. This covers other LocalScripts and
+		Roblox state changes. It cannot stop the server from moving or kicking you.
+
+	v4 additions
+		AIM tab: target priority, max distance, toggle mode, sticky, skip shield, target marker.
+		v5 aimlock: locks a player (survives respawns), runs last, HARD LOCK, OVERRIDE CAM, LOCK GRACE.
+		ESP tab: skeleton, HP bar, look line, off-screen arrows, visible only. Aimlock target shows red.
+		INTERFACE tab (LIVING UI): edge light, aurora, breathe, corner pulses, animation speed.
+
+	Rank crest (STATUS tab, PLAYER card)
+		A rotating magical seal with orbiting glyphs replaces the plain rank letter.
+		E / D / C follow the theme, B is emerald, A is amethyst, S is gold with a third seal square.
+		Higher tiers show more orbiting glyphs and a stronger glow. GLOW INTENSITY scales it.
+
+	Configs
+		The CONFIG tab saves named presets for this session and exports/imports them as a text code.
+		Roblox LocalScripts cannot write files, so saved presets are lost when you leave the game.
+		Copy the exported code somewhere to keep it.
+
+	A key is required before anything loads (see the Key system section). Owner keys unlock every
+	limit, member keys are capped. Note: this check runs on the client, so it can be bypassed by
+	anyone who edits their own copy of the script.
+
+	Intro: set INTRO_MUSIC_ID / INTRO_IMAGE below. Click or press any key to skip it.
+]]
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local SoundService = game:GetService("SoundService")
+local Lighting = game:GetService("Lighting")
+local HttpService = game:GetService("HttpService")
+local TeleportService = game:GetService("TeleportService")
+
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+
+local INTRO_ENABLED = true
+local INTRO_IMAGE = ""
+local INTRO_MUSIC_ID = ""
+local INTRO_MUSIC_VOLUME = 0.6
+
+--------------------------------------------------------------------------------
+-- Configuration
+--------------------------------------------------------------------------------
+
+local Config = {
+	flySpeed = 60, verticalSpeed = 60, boost = 2, flyAccel = 0.15,
+	walkSpeed = 16, jumpPower = 50, fov = 70,
+	flying = false, noclip = false, infiniteJump = false, faceCamera = true, smooth = true,
+	flyKey = Enum.KeyCode.F, menuKey = Enum.KeyCode.RightShift,
+	upKey = Enum.KeyCode.Space, downKey = Enum.KeyCode.LeftControl,
+	hue = 0.58, glow = 1, flow = 1, particles = true, stars = true, uiScale = 1, notifications = true,
+	-- Movement
+	bhop = false, sprint = false, sprintMult = 1.6, keepStats = false,
+	glide = false, glideSpeed = 20, antiVoid = false, spin = false, spinSpeed = 360, freeze = false,
+	clickTp = false, clickTpKey = Enum.KeyCode.LeftAlt,
+	-- Camera
+	zoom = false, zoomKey = Enum.KeyCode.Z, zoomFov = 25, unlockZoom = false, firstPerson = false,
+	-- Utility
+	antiAfk = false, hud = false, crosshair = false, crosshairSize = 10,
+}
+
+local STATS = {
+	{ key = "flySpeed",      label = "FLY SPEED",  min = 10, max = 300, step = 10 },
+	{ key = "verticalSpeed", label = "VERTICAL",   min = 10, max = 300, step = 10 },
+	{ key = "boost",         label = "BOOST",      min = 1,  max = 6,   step = 1 },
+	{ key = "walkSpeed",     label = "WALK SPEED", min = 8,  max = 200, step = 4 },
+	{ key = "jumpPower",     label = "JUMP POWER", min = 10, max = 250, step = 5 },
+	{ key = "fov",           label = "FIELD OF VIEW", min = 40, max = 120, step = 5 },
+}
+
+local TOGGLES = {
+	{ key = "flying",       label = "FLY" },
+	{ key = "noclip",       label = "NOCLIP" },
+	{ key = "infiniteJump", label = "INF JUMP" },
+	{ key = "faceCamera",   label = "FACE CAM" },
+	{ key = "smooth",       label = "SMOOTH" },
+}
+
+local PRESETS = { 0.58, 0.50, 0.76, 0.84, 0.38, 0.12, 0.00, 0.92 }
+local RANKS = { { 500, "S" }, { 300, "A" }, { 200, "B" }, { 120, "C" }, { 60, "D" }, { 0, "E" } }
+
+local DEFAULTS = {}
+for _, stat in ipairs(STATS) do DEFAULTS[stat.key] = Config[stat.key] end
+
+-- Allowed range for every numeric setting that is not in STATS. Used when importing configs.
+local LIMITS = {
+	hue = { 0, 1 }, glow = { 0, 1 }, flow = { 0.2, 3 }, uiScale = { 0.6, 1.2 },
+	flyAccel = { 0.02, 1 }, sprintMult = { 1, 3 }, glideSpeed = { 5, 80 }, spinSpeed = { 30, 1440 },
+	zoomFov = { 10, 60 }, crosshairSize = { 4, 40 },
+	quality = { 1, 10 }, clockTime = { 0, 24 }, gravity = { 0, 400 }, exposure = { -3, 3 },
+	aimSmooth = { 0, 0.95 }, aimPingScale = { 0, 2 }, aimRadius = { 50, 800 },
+	espTagScale = { 0.4, 1.5 }, espTagBg = { 0, 1 }, espBoxScale = { 0.5, 1.5 }, espMaxDist = { 100, 5000 },
+}
+
+local GOLD = Color3.fromRGB(255, 222, 160)
+local RED = Color3.fromRGB(255, 110, 140)
+
+local ready = false
+local statsModified = false
+local introPlaying = false
+local noclipParts = {}
+local flightObjects = {}
+local flightConnection
+local velocity = Vector3.zero
+local Handlers, renderers, Actions = {}, {}, {}
+local steppers, refreshers = {}, {} -- steppers[key](value) sets a stat; refreshers re-read Config into widgets.
+local playIntro
+local notify = function() end -- Replaced once the toast exists.
+local listening -- Callback awaiting the next key press while a binding is changed.
+local random = Random.new(7)
+
+local function create(class, properties, parent)
+	local object = Instance.new(class)
+	for name, value in pairs(properties) do object[name] = value end
+	object.Parent = parent
+	return object
+end
+
+local function renderAll()
+	for _, render in pairs(renderers) do render() end
+end
+
+-- True when `other` is on the same (non-nil) team as the local player.
+local function isTeammate(other)
+	return player.Team ~= nil and other.Team == player.Team
+end
+
+--------------------------------------------------------------------------------
+-- Theme system
+--------------------------------------------------------------------------------
+
+local function createPalette(hue)
+	return {
+		accent = Color3.fromHSV(hue, 0.75, 1),
+		line = Color3.fromHSV(hue, 0.45, 1),
+		text = Color3.fromHSV(hue, 0.10, 1),
+		muted = Color3.fromHSV(hue, 0.35, 0.78),
+		panel = Color3.fromHSV(hue, 0.85, 0.12),
+		backTop = Color3.fromHSV(hue, 0.85, 0.16),
+		backBottom = Color3.fromHSV(hue, 0.92, 0.05),
+		trim = Color3.fromHSV(hue, 0.30, 1),
+	}
+end
+
+local Colors = createPalette(Config.hue)
+local bindings, glowBindings = {}, {}
+
+local function bind(object, property, role)
+	local function apply()
+		object[property] = typeof(role) == "function" and role(Colors) or Colors[role]
+	end
+	apply()
+	table.insert(bindings, apply)
+	return object
+end
+
+local function bindGlow(object, property, transparency)
+	local function apply()
+		object[property] = 1 - (1 - transparency) * Config.glow
+	end
+	apply()
+	table.insert(glowBindings, apply)
+	return object
+end
+
+local function setHue(hue)
+	Config.hue = hue
+	Colors = createPalette(hue)
+	for _, apply in ipairs(bindings) do apply() end
+	for _, render in pairs(renderers) do render() end
+end
+
+local function applyGlow()
+	for _, apply in ipairs(glowBindings) do apply() end
+end
+
+--------------------------------------------------------------------------------
+-- Interface helpers
+--------------------------------------------------------------------------------
+
+local Fonts = { regular = Enum.Font.GothamMedium, bold = Enum.Font.GothamBold, black = Enum.Font.GothamBlack }
+
+local function isPress(input)
+	return input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch
+end
+
+local function isMove(input)
+	return input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch
+end
+
+local function outline(object, transparency)
+	return bind(create("UIStroke", { Thickness = 1, Transparency = transparency }, object), "Color", "line")
+end
+
+-- `Glow` (boolean) and `Role` (palette key) are handled here and are not Instance properties.
+local function label(parent, properties)
+	local glow, role = properties.Glow, properties.Role
+	properties.Glow, properties.Role = nil, nil
+	properties.BackgroundTransparency = 1
+	properties.Font = properties.Font or Fonts.regular
+	properties.TextSize = properties.TextSize or 14
+	properties.TextXAlignment = properties.TextXAlignment or Enum.TextXAlignment.Left
+	properties.Size = properties.Size or UDim2.fromScale(1, 1)
+	local object = bind(create("TextLabel", properties, parent), "TextColor3", role or "text")
+	if glow then
+		bindGlow(bind(create("UIStroke", { Thickness = 1.5 }, object), "Color", "accent"), "Transparency", 0.5)
+	end
+	return object
+end
+
+local function addButton(parent, properties)
+	local customFill = properties.BackgroundColor3
+	properties.AutoButtonColor = false
+	properties.BackgroundTransparency = properties.BackgroundTransparency or 0.3
+	properties.BorderSizePixel = 0
+	properties.Font = Fonts.bold
+	properties.TextSize = properties.TextSize or 13
+	local button = bind(create("TextButton", properties, parent), "TextColor3", "text")
+	if not customFill then bind(button, "BackgroundColor3", "panel") end
+	outline(button, 0.45)
+	return button
+end
+
+local function addTextBox(parent, properties)
+	properties.BorderSizePixel = 0
+	properties.BackgroundTransparency = 0.3
+	properties.Font = Fonts.bold
+	properties.TextSize = properties.TextSize or 13
+	properties.ClearTextOnFocus = false
+	properties.TextXAlignment = Enum.TextXAlignment.Left
+	properties.Text = properties.Text or ""
+	properties.ClipsDescendants = true
+	local box = create("TextBox", properties, parent)
+	bind(box, "BackgroundColor3", "panel")
+	bind(box, "TextColor3", "text")
+	bind(box, "PlaceholderColor3", "muted")
+	create("UIPadding", { PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 8) }, box)
+	outline(box, 0.45)
+	return box
+end
+
+local function onHold(button, action)
+	local token
+	button.MouseButton1Down:Connect(function()
+		local id = {}
+		token = id
+		action()
+		task.delay(0.4, function()
+			while token == id do
+				action()
+				task.wait(0.06)
+			end
+		end)
+	end)
+	local function release() token = nil end
+	button.MouseButton1Up:Connect(release)
+	button.MouseLeave:Connect(release)
+end
+
+-- Drags `target` by `handle` and keeps the window on screen.
+local function makeDraggable(handle, target)
+	local origin, start
+	handle.InputBegan:Connect(function(input)
+		if not isPress(input) then return end
+		origin, start = input.Position, target.Position
+		input.Changed:Connect(function()
+			if input.UserInputState == Enum.UserInputState.End then origin = nil end
+		end)
+	end)
+	UserInputService.InputChanged:Connect(function(input)
+		if origin and isMove(input) then
+			local delta = input.Position - origin
+			local view = workspace.CurrentCamera.ViewportSize
+			local x = math.clamp(start.X.Offset + delta.X, -view.X / 2 + 80, view.X / 2 - 80)
+			local y = math.clamp(start.Y.Offset + delta.Y, -view.Y / 2 + 80, view.Y / 2 - 80)
+			target.Position = UDim2.new(start.X.Scale, x, start.Y.Scale, y)
+		end
+	end)
+end
+
+-- Soft light made of stacked translucent diamonds (squares turned 45 degrees, so no curves).
+local function addBloom(parent, position, size, layers, transparency, color)
+	for index = 1, layers do
+		local side = size * index / layers / 1.4142 -- keeps the diamond's tip-to-tip width equal to the old circle diameter
+		local circle = create("Frame", {
+			AnchorPoint = Vector2.new(0.5, 0.5), Position = position, Rotation = 45,
+			Size = UDim2.fromOffset(side, side), BorderSizePixel = 0,
+		}, parent)
+		if color then
+			circle.BackgroundColor3, circle.BackgroundTransparency = color, transparency
+		else
+			bindGlow(bind(circle, "BackgroundColor3", "accent"), "BackgroundTransparency", transparency)
+		end
+	end
+end
+
+-- Square L-shaped brackets on the four corners. `color` is a palette role or a Color3.
+-- A negative inset puts them outside the parent, a positive one inside.
+local function addBrackets(parent, length, thickness, color, inset)
+	for _, corner in ipairs({ { 0, 0 }, { 1, 0 }, { 0, 1 }, { 1, 1 } }) do
+		local cx, cy = corner[1], corner[2]
+		for _, horizontal in ipairs({ true, false }) do
+			local frame = create("Frame", {
+				AnchorPoint = Vector2.new(cx, cy),
+				Position = UDim2.new(cx, cx == 0 and inset or -inset, cy, cy == 0 and inset or -inset),
+				Size = horizontal and UDim2.fromOffset(length, thickness) or UDim2.fromOffset(thickness, length),
+				BorderSizePixel = 0,
+			}, parent)
+			if typeof(color) == "string" then bind(frame, "BackgroundColor3", color) else frame.BackgroundColor3 = color end
+		end
+	end
+end
+
+-- Rotating rune: three nested squares and a ring. `fixed` (a colour table) ignores the theme.
+local sigils = {}
+local function makeSigil(parent, size, position, fixed)
+	local function paint(object, property, role)
+		if fixed then object[property] = fixed[role] else bind(object, property, role) end
+		return object
+	end
+	local function soften(stroke, transparency)
+		if fixed then stroke.Transparency = transparency else bindGlow(stroke, "Transparency", transparency) end
+	end
+
+	local holder = create("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0.5), Position = position,
+		Size = UDim2.fromOffset(size, size), BackgroundTransparency = 1,
+	}, parent)
+
+	local layers = {}
+	for index = 1, 3 do
+		local scale = 0.72 - (index - 1) * 0.16
+		local frame = create("Frame", {
+			AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5),
+			Size = UDim2.fromScale(scale, scale), BackgroundTransparency = 1,
+		}, holder)
+		local stroke = paint(create("UIStroke", { Thickness = index == 2 and 1.5 or 2 }, frame), "Color", index == 2 and "trim" or "accent")
+		soften(stroke, 0.15)
+		layers[index] = { frame = frame, base = index * 17, speed = (index % 2 == 0 and -1 or 1) * (10 + index * 8) }
+	end
+
+	local ring = create("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5),
+		Size = UDim2.fromScale(0.68, 0.68), Rotation = 45, BackgroundTransparency = 1,
+	}, holder)
+	soften(paint(create("UIStroke", { Thickness = 1.5 }, ring), "Color", "line"), 0.35)
+
+	local core = paint(create("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5),
+		Size = UDim2.fromScale(0.08, 0.08), Rotation = 45, BorderSizePixel = 0,
+	}, holder), "BackgroundColor3", "text")
+
+	local sigil = { holder = holder }
+	function sigil.update(angle)
+		for _, layer in ipairs(layers) do layer.frame.Rotation = layer.base + angle * layer.speed end
+	end
+	return sigil
+end
+
+-- Shooting stars with a bright head, tapering tail and four-point flare.
+-- `options` sets length, speed, life and interval, each as { min, max }.
+local function makeMeteorField(parent, width, height, count, options, fixed)
+	local function paint(object, property, role)
+		if fixed then object[property] = fixed[role] else bind(object, property, role) end
+		return object
+	end
+	local function fade(object, rotation, points)
+		local keypoints = {}
+		for _, point in ipairs(points) do table.insert(keypoints, NumberSequenceKeypoint.new(point[1], point[2])) end
+		create("UIGradient", { Rotation = rotation, Transparency = NumberSequence.new(keypoints) }, object)
+	end
+
+	local meteors = {}
+	for index = 1, count do
+		local group = create("CanvasGroup", {
+			AnchorPoint = Vector2.new(0.5, 0.5), Size = UDim2.fromOffset(200, 40),
+			BackgroundTransparency = 1, GroupTransparency = 1, Visible = false,
+		}, parent)
+
+		local function strip(thickness, role, points, scaleX, offsetX)
+			local frame = paint(create("Frame", {
+				AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -20, 0.5, 0),
+				Size = UDim2.new(scaleX, offsetX, 0, thickness), BorderSizePixel = 0,
+			}, group), "BackgroundColor3", role)
+			fade(frame, 0, points)
+		end
+		strip(10, "accent", { { 0, 1 }, { 1, 0.72 } }, 1, -20)
+		strip(3, "line", { { 0, 1 }, { 0.6, 0.65 }, { 1, 0.05 } }, 1, -20)
+		strip(1.5, "text", { { 0, 1 }, { 1, 0 } }, 0.45, 0)
+
+		for _, spec in ipairs({ { 28, "accent", 0.75 }, { 16, "line", 0.4 }, { 7, "text", 0 } }) do
+			local circle = paint(create("Frame", {
+				AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.new(1, -20, 0.5, 0), Rotation = 45,
+				Size = UDim2.fromOffset(spec[1] / 1.4142, spec[1] / 1.4142), BackgroundTransparency = spec[3], BorderSizePixel = 0,
+			}, group), "BackgroundColor3", spec[2])
+		end
+		for _, vertical in ipairs({ false, true }) do
+			local flare = paint(create("Frame", {
+				AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.new(1, -20, 0.5, 0),
+				Size = vertical and UDim2.fromOffset(2, 34) or UDim2.fromOffset(34, 2), BorderSizePixel = 0,
+			}, group), "BackgroundColor3", "text")
+			fade(flare, vertical and 90 or 0, { { 0, 1 }, { 0.5, 0 }, { 1, 1 } })
+		end
+		meteors[index] = { group = group, active = false }
+	end
+
+	local function launch(meteor)
+		local mirrored = random:NextInteger(0, 1) == 1
+		local angle = random:NextNumber(18, 40)
+		if mirrored then angle = 180 - angle end
+		local radians = math.rad(angle)
+		meteor.direction = Vector2.new(math.cos(radians), math.sin(radians))
+		meteor.length = random:NextNumber(options.length[1], options.length[2])
+		meteor.speed = random:NextNumber(options.speed[1], options.speed[2])
+		meteor.life = random:NextNumber(options.life[1], options.life[2])
+		meteor.age = 0
+		meteor.head = Vector2.new(
+			(mirrored and random:NextNumber(0.4, 1.05) or random:NextNumber(-0.05, 0.6)) * width,
+			random:NextNumber(-0.1, 0.35) * height
+		)
+		meteor.group.Size = UDim2.fromOffset(meteor.length + 20, 40)
+		meteor.group.Rotation = angle
+		meteor.group.Visible = true
+		meteor.active = true
+	end
+
+	local field = { enabled = true }
+	local timer = random:NextNumber(0.3, 1)
+
+	function field.burst(amount)
+		for _, meteor in ipairs(meteors) do
+			if amount <= 0 then break end
+			if not meteor.active then
+				launch(meteor)
+				amount -= 1
+			end
+		end
+	end
+
+	function field.update(dt)
+		timer -= dt
+		if timer <= 0 then
+			timer = random:NextNumber(options.interval[1], options.interval[2])
+			if field.enabled then field.burst(1) end
+		end
+		local intensity = fixed and 1 or Config.glow
+		for _, meteor in ipairs(meteors) do
+			if meteor.active then
+				meteor.age += dt
+				local progress = meteor.age / meteor.life
+				if progress >= 1 then
+					meteor.active = false
+					meteor.group.Visible = false
+				else
+					meteor.head += meteor.direction * meteor.speed * dt
+					local center = meteor.head - meteor.direction * (meteor.length / 2 - 10)
+					meteor.group.Position = UDim2.fromOffset(center.X, center.Y)
+					local alpha = math.clamp(math.min(progress / 0.15, (1 - progress) / 0.35), 0, 1)
+					meteor.group.GroupTransparency = 1 - alpha * intensity
+				end
+			end
+		end
+	end
+
+	return field
+end
+
+-- Straight line segments joined end to end (used for the lightning notch). Points are Vector2s in `parent` pixels.
+local function addPolyline(parent, points, thickness, role, transparency)
+	for index = 1, #points - 1 do
+		local from, to = points[index], points[index + 1]
+		local delta = to - from
+		local middle = (from + to) / 2
+		bind(create("Frame", {
+			AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromOffset(middle.X, middle.Y),
+			Size = UDim2.fromOffset(delta.Magnitude + thickness, thickness),
+			Rotation = math.deg(math.atan2(delta.Y, delta.X)), BackgroundTransparency = transparency, BorderSizePixel = 0,
+		}, parent), "BackgroundColor3", role)
+	end
+end
+
+-- A titled card: translucent panel, accent tick, and a divider under the title with a lightning notch at its right end.
+local function addCard(parent, title, x, y, w, h)
+	local frame = bind(create("Frame", {
+		Position = UDim2.fromOffset(x, y), Size = UDim2.fromOffset(w, h),
+		BackgroundTransparency = 0.45, BorderSizePixel = 0, ClipsDescendants = true,
+	}, parent), "BackgroundColor3", "panel")
+	outline(frame, 0.55)
+	bindGlow(bind(create("Frame", { Position = UDim2.fromOffset(0, 5), Size = UDim2.fromOffset(3, 18), BorderSizePixel = 0 }, frame),
+		"BackgroundColor3", "accent"), "BackgroundTransparency", 0.05)
+	if title then
+		label(frame, {
+			Text = title, TextSize = 11, Font = Fonts.bold, Role = "trim",
+			Position = UDim2.fromOffset(12, 6), Size = UDim2.new(1, -24, 0, 16),
+		})
+		local notch = w - 10 - 44
+		addPolyline(frame, {
+			Vector2.new(10, 26), Vector2.new(notch, 26), Vector2.new(notch + 9, 26), Vector2.new(notch + 17, 14),
+			Vector2.new(notch + 23, 33), Vector2.new(notch + 31, 20), Vector2.new(notch + 36, 26), Vector2.new(w - 10, 26),
+		}, 1.5, "line", 0.45)
+	end
+	return frame
+end
+
+local function addToggle(parent, definition, position, size)
+	local button = addButton(parent, { Text = definition.label, TextSize = 12, Position = position, Size = size })
+	local function render()
+		local enabled = Config[definition.key]
+		button.BackgroundColor3 = enabled and Colors.accent or Colors.panel
+		button.BackgroundTransparency = enabled and 0.45 or 0.3
+		button.TextColor3 = enabled and Colors.text or Colors.muted
+	end
+	button.Activated:Connect(function()
+		local enabled = not Config[definition.key]
+		Config[definition.key] = enabled
+		if Handlers[definition.key] then Handlers[definition.key](enabled) end
+		if definition.key ~= "flying" then
+			notify(definition.label .. (enabled and " ENABLED" or " DISABLED"))
+		end
+		render()
+	end)
+	renderers[definition.key] = render
+	render()
+	return button
+end
+
+-- `format` turns the value into the readout text. Width `w` is the full track width.
+local function addSlider(parent, caption, x, y, w, min, max, get, set, rainbow, format)
+	label(parent, { Text = caption, TextSize = 11, Role = "muted", Position = UDim2.fromOffset(x, y), Size = UDim2.fromOffset(300, 16) })
+	local readout = label(parent, {
+		TextSize = 12, Font = Fonts.bold, TextXAlignment = Enum.TextXAlignment.Right,
+		Position = UDim2.fromOffset(x + w - 120, y), Size = UDim2.fromOffset(120, 16),
+	})
+	local track = create("Frame", {
+		Position = UDim2.fromOffset(x, y + 22), Size = UDim2.fromOffset(w, 8),
+		BackgroundColor3 = Color3.new(1, 1, 1), BorderSizePixel = 0,
+	}, parent)
+	outline(track, 0.5)
+
+	local fill
+	if rainbow then
+		local keypoints = {}
+		for step = 0, 6 do table.insert(keypoints, ColorSequenceKeypoint.new(step / 6, Color3.fromHSV(step / 6, 0.75, 1))) end
+		create("UIGradient", { Color = ColorSequence.new(keypoints) }, track)
+	else
+		bind(track, "BackgroundColor3", "panel")
+		fill = bind(create("Frame", { Size = UDim2.fromScale(0, 1), BorderSizePixel = 0 }, track), "BackgroundColor3", "accent")
+	end
+
+	local knob = bind(create("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0.5), Size = UDim2.fromOffset(6, 18), BorderSizePixel = 0,
+	}, track), "BackgroundColor3", "text")
+	outline(knob, 0.3)
+
+	local function render()
+		local ratio = math.clamp((get() - min) / (max - min), 0, 1)
+		knob.Position = UDim2.fromScale(ratio, 0.5)
+		if fill then fill.Size = UDim2.fromScale(ratio, 1) end
+		readout.Text = format(get())
+	end
+
+	local dragging = false
+	local function update(px)
+		set(min + (max - min) * math.clamp((px - track.AbsolutePosition.X) / track.AbsoluteSize.X, 0, 1))
+		render()
+	end
+	local hit = create("TextButton", {
+		Text = "", BackgroundTransparency = 1, Position = UDim2.fromOffset(x, y + 12), Size = UDim2.fromOffset(w, 28),
+	}, parent)
+	hit.InputBegan:Connect(function(input)
+		if isPress(input) then dragging = true update(input.Position.X) end
+	end)
+	UserInputService.InputChanged:Connect(function(input)
+		if dragging and isMove(input) then update(input.Position.X) end
+	end)
+	UserInputService.InputEnded:Connect(function(input)
+		if isPress(input) then dragging = false end
+	end)
+	table.insert(refreshers, render)
+	render()
+end
+
+local function addKeybind(parent, caption, key, x, y, w, h)
+	local button = addButton(parent, { TextSize = 12, Position = UDim2.fromOffset(x, y), Size = UDim2.fromOffset(w, h) })
+	local function refresh() button.Text = string.format("%s: %s", caption, Config[key].Name) end
+	button.Activated:Connect(function()
+		button.Text = caption .. ": ..."
+		listening = function(newKey)
+			if newKey then Config[key] = newKey end
+			refresh()
+		end
+	end)
+	table.insert(refreshers, refresh)
+	refresh()
+	return button
+end
+
+--------------------------------------------------------------------------------
+-- Key system
+--------------------------------------------------------------------------------
+
+-- Keys are stored as salted SHA-256 hashes: sha256(KEY_SALT .. KEY). Delete a line to revoke a key.
+-- Optional field: expires = <os.time() value>.
+local KEY_SALT = "5D6D1BAFC0ED5EA4"
+local PRESET_KEY = ""
+local MAX_ATTEMPTS, LOCKOUT_SECONDS = 5, 30
+
+local KEYS = {
+	["041213a1c81af57c5590a1dbb5418dd2d1e17ea289edcf17c64f5e662b34e33b"] = { role = "owner", name = "Owner" },
+	["e13f9ab2eadd353040da03dcc534b62b57ea4a44c5c04b05b96814d8ac1e27c1"] = { role = "member", name = "Member 1" },
+	["f614fa81d2bfb7fa3d9a55e7925ce8342eacf976b401144e2054b2b9f091464d"] = { role = "member", name = "Member 2" },
+	["ea93da93300cd1e60526ed19f3073f576b4de5123820e9b5e159059ffc1442c4"] = { role = "member", name = "Member 3" },
+	["1778147e666533a7dbe6f885f65ed796155621af26777a25c00a90130cbfc476"] = { role = "member", name = "Member 4" },
+	["50c1793d5fbc7a1046c9522f002f90917a355f18db9dc0e42c285d45f189a5bb"] = { role = "member", name = "Member 5" },
+	["46bf2def2254109db1ce63a900c54d59779a2b24ac6fdf452f4e8a3151f1a5c3"] = { role = "member", name = "Member 6" },
+	["f8158b679d9068a485d74fae424c98f49a3d74d0211675aa7ab1290ba00f6ee2"] = { role = "member", name = "Member 7" },
+	["ba261a6326918c73ae2afc64919283bff1366121d9bdd45854f196caf357e402"] = { role = "member", name = "Member 8" },
+	["b3a8b99f011506c29ad18edf450385d0c97e7ee7b56f4f90a78c2bbe7bca6568"] = { role = "member", name = "Member 9" },
+	["df33649a89a5a3db4f7dcd5ce7fb661dbb9e9db4d782cdffa8ca07f37866297c"] = { role = "member", name = "Member 10" },
+}
+
+local ROLES = {
+	owner = { label = "OWNER", title = "MONARCH" },
+	member = {
+		label = "MEMBER", title = "HUNTER",
+		caps = { flySpeed = 150, verticalSpeed = 150, boost = 3, walkSpeed = 100, jumpPower = 120 },
+	},
+}
+
+local SHA_K = {
+	0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+	0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+	0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+	0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+	0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+	0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+	0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+	0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+}
+
+local function sha256(message)
+	local H = {
+		0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+		0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+	}
+	local length = #message
+	local bits = length * 8
+	message = message .. "\128" .. string.rep("\0", (55 - length) % 64)
+		.. string.char(0, 0, 0, 0, bit32.rshift(bits, 24) % 256, bit32.rshift(bits, 16) % 256, bit32.rshift(bits, 8) % 256, bits % 256)
+
+	for chunk = 1, #message, 64 do
+		local w = {}
+		for index = 1, 16 do
+			local first = chunk + (index - 1) * 4
+			local b1, b2, b3, b4 = string.byte(message, first, first + 3)
+			w[index] = b1 * 0x1000000 + b2 * 0x10000 + b3 * 0x100 + b4
+		end
+		for index = 17, 64 do
+			local x, y = w[index - 15], w[index - 2]
+			local s0 = bit32.bxor(bit32.rrotate(x, 7), bit32.rrotate(x, 18), bit32.rshift(x, 3))
+			local s1 = bit32.bxor(bit32.rrotate(y, 17), bit32.rrotate(y, 19), bit32.rshift(y, 10))
+			w[index] = (w[index - 16] + s0 + w[index - 7] + s1) % 0x100000000
+		end
+
+		local a, b, c, d, e, f, g, h = H[1], H[2], H[3], H[4], H[5], H[6], H[7], H[8]
+		for index = 1, 64 do
+			local S1 = bit32.bxor(bit32.rrotate(e, 6), bit32.rrotate(e, 11), bit32.rrotate(e, 25))
+			local ch = bit32.bxor(bit32.band(e, f), bit32.band(bit32.bnot(e), g))
+			local temp1 = (h + S1 + ch + SHA_K[index] + w[index]) % 0x100000000
+			local S0 = bit32.bxor(bit32.rrotate(a, 2), bit32.rrotate(a, 13), bit32.rrotate(a, 22))
+			local maj = bit32.bxor(bit32.band(a, b), bit32.band(a, c), bit32.band(b, c))
+			local temp2 = (S0 + maj) % 0x100000000
+			h, g, f, e, d, c, b, a = g, f, e, (d + temp1) % 0x100000000, c, b, a, (temp1 + temp2) % 0x100000000
+		end
+
+		local working = { a, b, c, d, e, f, g, h }
+		for index = 1, 8 do H[index] = (H[index] + working[index]) % 0x100000000 end
+	end
+
+	local parts = {}
+	for index = 1, 8 do
+		parts[index] = string.format("%04x%04x", bit32.rshift(H[index], 16), bit32.band(H[index], 0xFFFF))
+	end
+	return table.concat(parts)
+end
+
+local function checkKey(text)
+	local normalized = (string.upper(text):gsub("%s", ""))
+	if #normalized < 8 or #normalized > 64 then return nil, "INVALID KEY" end
+	local entry = KEYS[sha256(KEY_SALT .. normalized)]
+	if not entry then return nil, "INVALID KEY" end
+	if entry.expires and os.time() > entry.expires then return nil, "KEY EXPIRED" end
+	return entry
+end
+
+local keyScreen, keyBackdrop
+
+local function releaseKeyScreen()
+	local screen, backdrop = keyScreen, keyBackdrop
+	keyScreen, keyBackdrop = nil, nil
+	if not screen then return end
+	TweenService:Create(backdrop, TweenInfo.new(0.6), { GroupTransparency = 1 }):Play()
+	task.delay(0.7, function() screen:Destroy() end)
+end
+
+local function requireKey()
+	if PRESET_KEY ~= "" then
+		local entry = checkKey(PRESET_KEY)
+		if entry then return entry end
+	end
+
+	local C = Colors
+	keyScreen = create("ScreenGui", {
+		Name = "FlightKey", ResetOnSpawn = false, IgnoreGuiInset = true, DisplayOrder = 200,
+		ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+	}, playerGui)
+	keyBackdrop = create("CanvasGroup", {
+		Size = UDim2.fromScale(1, 1), BackgroundColor3 = Color3.new(1, 1, 1), BorderSizePixel = 0,
+	}, keyScreen)
+	create("UIGradient", { Rotation = 90, Color = ColorSequence.new(C.backTop, C.backBottom) }, keyBackdrop)
+	for index = 1, 6 do
+		local side = 700 * index / 6 / 1.4142
+		create("Frame", {
+			AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(side, side),
+			Rotation = 45, BackgroundColor3 = C.accent, BackgroundTransparency = 0.94, BorderSizePixel = 0,
+		}, keyBackdrop)
+	end
+
+	local panel = create("CanvasGroup", {
+		AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(440, 250),
+		BackgroundColor3 = C.panel, BackgroundTransparency = 0.05, BorderSizePixel = 0, GroupTransparency = 1,
+	}, keyBackdrop)
+	create("UIStroke", { Color = C.accent, Thickness = 1.5, Transparency = 0.2 }, panel)
+	addBrackets(panel, 16, 2, C.trim, 6)
+	create("Frame", { Size = UDim2.new(1, 0, 0, 3), BackgroundColor3 = C.accent, BorderSizePixel = 0 }, panel)
+
+	local function text(properties)
+		properties.BackgroundTransparency = 1
+		properties.AnchorPoint = Vector2.new(0.5, 0)
+		return create("TextLabel", properties, panel)
+	end
+	text({
+		Text = "[ SYSTEM ]", Font = Fonts.bold, TextSize = 11, TextColor3 = C.trim,
+		Position = UDim2.new(0.5, 0, 0, 20), Size = UDim2.fromOffset(300, 14),
+	})
+	local title = text({
+		Text = "ACCESS KEY", Font = Fonts.black, TextSize = 28, TextColor3 = C.text,
+		Position = UDim2.new(0.5, 0, 0, 36), Size = UDim2.fromOffset(300, 34),
+	})
+	create("UIStroke", { Color = C.accent, Thickness = 2, Transparency = 0.4 }, title)
+	text({
+		Text = "ENTER YOUR KEY TO CONTINUE", Font = Fonts.regular, TextSize = 11, TextColor3 = C.muted,
+		Position = UDim2.new(0.5, 0, 0, 74), Size = UDim2.fromOffset(380, 14),
+	})
+
+	local box = create("TextBox", {
+		AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 0, 0, 100), Size = UDim2.fromOffset(360, 40),
+		BackgroundColor3 = C.backBottom, BackgroundTransparency = 0.1, BorderSizePixel = 0,
+		Font = Fonts.bold, TextSize = 17, TextColor3 = C.text, Text = "", ClearTextOnFocus = false,
+		PlaceholderText = "XXXX-XXXX-XXXX-XXXX-XXXX", PlaceholderColor3 = C.muted,
+	}, panel)
+	create("UIStroke", { Color = C.line, Thickness = 1, Transparency = 0.35 }, box)
+
+	local verify = create("TextButton", {
+		AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 0, 0, 152), Size = UDim2.fromOffset(360, 38),
+		BackgroundColor3 = C.accent, BackgroundTransparency = 0.55, BorderSizePixel = 0, AutoButtonColor = false,
+		Font = Fonts.bold, TextSize = 14, TextColor3 = C.text, Text = "VERIFY KEY",
+	}, panel)
+	create("UIStroke", { Color = C.line, Thickness = 1, Transparency = 0.3 }, verify)
+
+	local status = text({
+		Text = "", Font = Fonts.bold, TextSize = 12, TextColor3 = RED,
+		Position = UDim2.new(0.5, 0, 0, 200), Size = UDim2.fromOffset(400, 18),
+	})
+	text({
+		Text = "NO KEY? CONTACT THE OWNER", Font = Fonts.regular, TextSize = 10, TextColor3 = C.muted,
+		Position = UDim2.new(0.5, 0, 0, 222), Size = UDim2.fromOffset(380, 14),
+	})
+
+	TweenService:Create(panel, TweenInfo.new(0.6), { GroupTransparency = 0 }):Play()
+
+	local result, attempts, lockedUntil, busy = nil, 0, 0, false
+
+	local function shake()
+		local origin = panel.Position
+		for step = 1, 6 do
+			panel.Position = origin + UDim2.fromOffset((step % 2 == 0 and 1 or -1) * (14 - step * 2), 0)
+			task.wait(0.03)
+		end
+		panel.Position = origin
+	end
+
+	local function submit()
+		if result or busy or os.clock() < lockedUntil then return end
+		busy = true
+		local entry, problem = checkKey(box.Text)
+		if entry then
+			result = entry
+		else
+			attempts += 1
+			if attempts >= MAX_ATTEMPTS then
+				attempts, lockedUntil = 0, os.clock() + LOCKOUT_SECONDS
+			else
+				status.TextColor3 = RED
+				status.Text = string.format("%s  (%d/%d)", problem, attempts, MAX_ATTEMPTS)
+			end
+			shake()
+		end
+		busy = false
+	end
+
+	verify.Activated:Connect(submit)
+	box.FocusLost:Connect(function(enterPressed)
+		if enterPressed then submit() end
+	end)
+
+	while not result do
+		local remaining = lockedUntil - os.clock()
+		if remaining > 0 then
+			status.TextColor3 = RED
+			status.Text = string.format("TOO MANY ATTEMPTS - WAIT %ds", math.ceil(remaining))
+		elseif lockedUntil > 0 then
+			lockedUntil = 0
+			status.Text = ""
+		end
+		task.wait(0.1)
+	end
+
+	status.TextColor3 = GOLD
+	status.Text = "ACCESS GRANTED - " .. string.upper(result.name)
+	task.wait(1.1)
+	TweenService:Create(panel, TweenInfo.new(0.4), { GroupTransparency = 1 }):Play()
+	task.wait(0.45)
+	return result
+end
+
+local session = requireKey()
+local role = ROLES[session.role] or ROLES.member
+if role.caps then
+	for _, stat in ipairs(STATS) do
+		if role.caps[stat.key] then stat.max = math.min(stat.max, role.caps[stat.key]) end
+	end
+end
+
+--------------------------------------------------------------------------------
+-- Character and flight behaviour
+--------------------------------------------------------------------------------
+
+local function getParts()
+	local character = player.Character
+	return character and character:FindFirstChildOfClass("Humanoid"), character and character:FindFirstChild("HumanoidRootPart")
+end
+
+-- Keys are ignored while a text box has focus so typing never moves the character.
+local function isDown(key)
+	return not UserInputService:GetFocusedTextBox() and UserInputService:IsKeyDown(key)
+end
+
+local function axis(positive, negative)
+	return (isDown(positive) and 1 or 0) - (isDown(negative) and 1 or 0)
+end
+
+local function applyHumanoidStats()
+	local humanoid = getParts()
+	if humanoid then
+		humanoid.WalkSpeed = Config.walkSpeed
+		humanoid.UseJumpPower = true
+		humanoid.JumpPower = Config.jumpPower
+	end
+end
+
+local function applyStat(key)
+	if not ready then return end
+	if key == "walkSpeed" or key == "jumpPower" then
+		statsModified = true
+		applyHumanoidStats()
+	elseif key == "fov" then
+		workspace.CurrentCamera.FieldOfView = Config.fov
+	end
+end
+
+-- All flight internals live in one table so the main chunk gets only one extra local.
+local Flight = { name = "FlightControl", rig = nil, yaw = CFrame.identity }
+
+function Flight.destroy()
+	for _, object in ipairs(flightObjects) do object:Destroy() end
+	flightObjects, Flight.rig = {}, nil
+end
+
+function Flight.build(root)
+	Flight.destroy()
+	local attachment = create("Attachment", { Name = "FlightAttachment" }, root)
+	local linear = create("LinearVelocity", {
+		Attachment0 = attachment, RelativeTo = Enum.ActuatorRelativeTo.World,
+		MaxForce = math.huge, VectorVelocity = velocity,
+	}, root)
+	local align = create("AlignOrientation", {
+		Mode = Enum.OrientationAlignmentMode.OneAttachment, Attachment0 = attachment,
+		MaxTorque = math.huge, Responsiveness = 30, CFrame = Flight.yaw,
+	}, root)
+	flightObjects = { attachment, linear, align }
+	Flight.rig = { attachment = attachment, linear = linear, align = align }
+end
+
+-- ANTI OVERRIDE: runs every Heartbeat while flying. Repairs anything another local script undid.
+function Flight.guard()
+	if not Config.flyLocked then return end
+	local humanoid, root = getParts()
+	if not (humanoid and root) or humanoid.Health <= 0 then return end
+
+	local rig = Flight.rig
+	if not rig or rig.attachment.Parent ~= root or rig.linear.Parent ~= root or rig.align.Parent ~= root then
+		Flight.build(root)
+		rig = Flight.rig
+	end
+	rig.linear.Enabled, rig.linear.Attachment0, rig.linear.MaxForce = true, rig.attachment, math.huge
+	rig.align.Enabled, rig.align.Attachment0, rig.align.MaxTorque = true, rig.attachment, math.huge
+
+	if not humanoid.PlatformStand then humanoid.PlatformStand = true end
+	if humanoid:GetState() ~= Enum.HumanoidStateType.PlatformStanding then
+		humanoid:ChangeState(Enum.HumanoidStateType.PlatformStanding)
+	end
+	if root.Anchored and not Config.freeze then root.Anchored = false end
+	root.AssemblyLinearVelocity = velocity -- fallback if the LinearVelocity is ever disabled mid-frame
+end
+
+-- Input and motion. Bound at the last render priority so it runs after other scripts.
+function Flight.step(dt)
+	local humanoid, root = getParts()
+	local camera = workspace.CurrentCamera
+	local rig = Flight.rig
+	if not (humanoid and root and camera and rig) or not root.Parent then return end
+	local cframe = camera.CFrame
+
+	local look, right = cframe.LookVector, cframe.RightVector
+	if Config.flyPlanar then
+		look, right = Vector3.new(look.X, 0, look.Z), Vector3.new(right.X, 0, right.Z)
+		look = look.Magnitude > 0.001 and look.Unit or Vector3.zero
+		right = right.Magnitude > 0.001 and right.Unit or Vector3.zero
+	end
+
+	local forward = axis(Enum.KeyCode.W, Enum.KeyCode.S)
+	if Config.flyCruise then forward = isDown(Enum.KeyCode.S) and 0 or 1 end -- S brakes while cruising
+	local direction = look * forward + right * axis(Enum.KeyCode.D, Enum.KeyCode.A)
+	if direction.Magnitude > 0 then direction = direction.Unit end
+
+	local boost = isDown(Enum.KeyCode.LeftShift) and Config.boost or 1
+	local vertical = axis(Config.upKey, Config.downKey)
+	local target = (direction * Config.flySpeed + Vector3.yAxis * vertical * Config.verticalSpeed) * boost
+
+	local rate = 1
+	if Config.smooth then
+		rate = target.Magnitude < velocity.Magnitude and Config.flyDecel or Config.flyAccel
+		rate = 1 - (1 - rate) ^ (dt * 60) -- same feel at any frame rate
+	end
+	velocity = velocity:Lerp(target, rate)
+	rig.linear.VectorVelocity = velocity
+
+	local flat = Vector3.new(cframe.LookVector.X, 0, cframe.LookVector.Z)
+	if Config.faceCamera and flat.Magnitude > 0.001 then Flight.yaw = CFrame.lookAt(Vector3.zero, flat) end
+
+	local orientation = Flight.yaw
+	local tilt = math.rad(Config.flyTilt)
+	if tilt > 0 then
+		local localVelocity = Flight.yaw:VectorToObjectSpace(velocity)
+		local lean = math.clamp(-localVelocity.Z / math.max(Config.flySpeed, 1), -1, 1)
+		local bank = math.clamp(localVelocity.X / math.max(Config.flySpeed, 1), -1, 1)
+		orientation = Flight.yaw * CFrame.Angles(-lean * tilt, 0, -bank * tilt)
+	end
+	rig.align.CFrame = orientation
+end
+
+local function stopFlight()
+	if flightConnection then flightConnection:Disconnect() flightConnection = nil end
+	pcall(function() RunService:UnbindFromRenderStep(Flight.name) end)
+	Flight.destroy()
+	velocity = Vector3.zero
+	local humanoid = getParts()
+	if humanoid then humanoid.PlatformStand = false end
+	-- Give collisions back if FLY NOCLIP was the only thing holding them off.
+	if not Config.noclip and Handlers.noclip then Handlers.noclip(false) end
+end
+
+local function startFlight()
+	local humanoid, root = getParts()
+	if not (humanoid and root) then return end
+	humanoid.PlatformStand = true
+
+	local flat = Vector3.new(root.CFrame.LookVector.X, 0, root.CFrame.LookVector.Z)
+	Flight.yaw = flat.Magnitude > 0.001 and CFrame.lookAt(Vector3.zero, flat) or CFrame.identity
+	Flight.build(root)
+
+	flightConnection = RunService.Heartbeat:Connect(Flight.guard) -- also the "is flying" flag
+	pcall(function() RunService:UnbindFromRenderStep(Flight.name) end)
+	RunService:BindToRenderStep(Flight.name, Enum.RenderPriority.Last.Value, Flight.step)
+end
+
+local function setFlying(enabled)
+	local before = Config.flying
+	if enabled then
+		if not flightConnection then startFlight() end
+	else
+		stopFlight()
+	end
+	Config.flying = flightConnection ~= nil
+	if renderers.flying then renderers.flying() end
+	if Config.flying ~= before then
+		notify(Config.flying and "FLIGHT ACTIVATED" or "FLIGHT DEACTIVATED")
+	end
+end
+
+local function setNoclip(enabled)
+	if enabled then return end
+	for part in pairs(noclipParts) do
+		if part.Parent then part.CanCollide = true end
+	end
+	table.clear(noclipParts)
+end
+
+Handlers.flying, Handlers.noclip = setFlying, setNoclip
+
+-- Turning FLY NOCLIP off mid-flight must restore collisions.
+Handlers.flyNoclip = function(enabled)
+	if not enabled and not Config.noclip then setNoclip(false) end
+end
+
+-- WHEEL SPEED: scroll to change fly speed while flying.
+UserInputService.InputChanged:Connect(function(input, processed)
+	if processed or introPlaying then return end
+	if input.UserInputType ~= Enum.UserInputType.MouseWheel then return end
+	if not (Config.flying and Config.flyWheel) or UserInputService:GetFocusedTextBox() then return end
+	if steppers.flySpeed then steppers.flySpeed(Config.flySpeed + input.Position.Z * 10) end
+end)
+
+RunService.Stepped:Connect(function()
+	local character = (Config.noclip or (Config.flying and Config.flyNoclip)) and player.Character
+	if not character then return end
+	for _, part in ipairs(character:GetDescendants()) do
+		if part:IsA("BasePart") and part.CanCollide then
+			noclipParts[part] = true
+			part.CanCollide = false
+		end
+	end
+end)
+
+UserInputService.JumpRequest:Connect(function()
+	local humanoid = Config.infiniteJump and getParts()
+	if humanoid then humanoid:ChangeState(Enum.HumanoidStateType.Jumping) end
+end)
+
+--------------------------------------------------------------------------------
+-- Feature logic: world, ESP, aimlock, movement, utility (no menu UI here)
+--------------------------------------------------------------------------------
+
+do -- World
+	local saved = {}
+	local function change(instance, property, value)
+		saved[instance] = saved[instance] or {}
+		if saved[instance][property] == nil then saved[instance][property] = instance[property] end
+		instance[property] = value
+	end
+	local function restore(instance, property)
+		local store = saved[instance]
+		if store and store[property] ~= nil then
+			instance[property] = store[property]
+			store[property] = nil
+		end
+	end
+
+	Config.fullbright, Config.noFog, Config.lite = false, false, false
+	Config.freezeTime, Config.noEffects, Config.noFx = false, false, false
+	Config.shadows = Lighting.GlobalShadows
+	Config.clockTime = Lighting.ClockTime
+	Config.gravity = workspace.Gravity
+	Config.exposure = Lighting.ExposureCompensation
+	Config.quality = 5
+	pcall(function()
+		local level = settings().Rendering.QualityLevel.Value
+		Config.quality = math.clamp(level == 0 and 5 or level, 1, 10)
+	end)
+
+	Handlers.fullbright = function(enabled)
+		if enabled then
+			change(Lighting, "Brightness", 2)
+			change(Lighting, "Ambient", Color3.fromRGB(178, 178, 178))
+			change(Lighting, "OutdoorAmbient", Color3.fromRGB(178, 178, 178))
+		else
+			restore(Lighting, "Brightness")
+			restore(Lighting, "Ambient")
+			restore(Lighting, "OutdoorAmbient")
+		end
+	end
+	Handlers.shadows = function(enabled) Lighting.GlobalShadows = enabled end
+	Handlers.noFog = function(enabled)
+		local atmosphere = Lighting:FindFirstChildOfClass("Atmosphere")
+		if enabled then
+			change(Lighting, "FogEnd", 1e6)
+			if atmosphere then change(atmosphere, "Density", 0) change(atmosphere, "Haze", 0) end
+		else
+			restore(Lighting, "FogEnd")
+			if atmosphere then restore(atmosphere, "Density") restore(atmosphere, "Haze") end
+		end
+	end
+	Handlers.lite = function(enabled)
+		Config.particles, Config.stars = not enabled, not enabled
+		if renderers.particles then renderers.particles() end
+		if renderers.stars then renderers.stars() end
+	end
+
+	-- Numeric settings: the sliders and the config loader both go through these.
+	Handlers.quality = function(value)
+		pcall(function() settings().Rendering.QualityLevel = Enum.QualityLevel:FromValue(value) end)
+	end
+	Handlers.clockTime = function(value) Lighting.ClockTime = value end
+	Handlers.gravity = function(value) workspace.Gravity = value end
+	Handlers.exposure = function(value) Lighting.ExposureCompensation = value end
+
+	-- NO EFFECTS: turns off blur, bloom, colour correction, sun rays and depth of field.
+	local effects = {}
+	Handlers.noEffects = function(enabled)
+		if enabled then
+			for _, child in ipairs(Lighting:GetChildren()) do
+				if child:IsA("PostEffect") then
+					effects[child] = child.Enabled
+					child.Enabled = false
+				end
+			end
+		else
+			for child, was in pairs(effects) do
+				if child.Parent then child.Enabled = was end
+			end
+			table.clear(effects)
+		end
+	end
+
+	-- NO PARTICLES: switches off every particle emitter, trail and beam in the world.
+	local fxSaved, fxConnection = {}, nil
+	local function silence(instance)
+		if (instance:IsA("ParticleEmitter") or instance:IsA("Trail") or instance:IsA("Beam")) and fxSaved[instance] == nil then
+			fxSaved[instance] = instance.Enabled
+			instance.Enabled = false
+		end
+	end
+	Handlers.noFx = function(enabled)
+		if enabled then
+			for _, instance in ipairs(workspace:GetDescendants()) do silence(instance) end
+			if not fxConnection then fxConnection = workspace.DescendantAdded:Connect(silence) end
+		else
+			if fxConnection then fxConnection:Disconnect() fxConnection = nil end
+			for instance, was in pairs(fxSaved) do
+				if instance.Parent then instance.Enabled = was end
+			end
+			table.clear(fxSaved)
+		end
+	end
+
+	-- FREEZE TIME keeps the clock on the TIME OF DAY slider.
+	RunService.Heartbeat:Connect(function()
+		if Config.freezeTime then Lighting.ClockTime = Config.clockTime end
+	end)
+end
+
+do -- ESP
 	Config.esp, Config.espNames, Config.espHealth, Config.espDist = false, true, true, true
 	Config.tracers, Config.charms = false, false
 	Config.espTeamCheck, Config.espTeamColor, Config.espBox, Config.espRainbow = false, false, false, false
 	Config.espSkeleton, Config.espHealthBar, Config.espLook, Config.espArrows, Config.espVisibleOnly = false, false, false, false, false
 	Config.espTagScale, Config.espTagBg, Config.espBoxScale, Config.espMaxDist = 0.65, 0.35, 1, 5000
 
-	local RAY_INTERVAL = 0.12 -- seconds between line-of-sight checks per player (was every frame)
-
 	local espFolder = create("Folder", { Name = "FlightESP" }, playerGui)
-	local overlay = create("ScreenGui", {
+	local entries = {}
+	local tracerGui = create("ScreenGui", {
 		Name = "FlightTracers", ResetOnSpawn = false, IgnoreGuiInset = true, DisplayOrder = -1,
 		ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
 	}, playerGui)
 	local rayParams = RaycastParams.new()
 	rayParams.FilterType = Enum.RaycastFilterType.Exclude
 
-	local BONES = {
-		R15 = {
-			{ "Head", "UpperTorso" }, { "UpperTorso", "LowerTorso" },
-			{ "UpperTorso", "LeftUpperArm" }, { "LeftUpperArm", "LeftLowerArm" }, { "LeftLowerArm", "LeftHand" },
-			{ "UpperTorso", "RightUpperArm" }, { "RightUpperArm", "RightLowerArm" }, { "RightLowerArm", "RightHand" },
-			{ "LowerTorso", "LeftUpperLeg" }, { "LeftUpperLeg", "LeftLowerLeg" }, { "LeftLowerLeg", "LeftFoot" },
-			{ "LowerTorso", "RightUpperLeg" }, { "RightUpperLeg", "RightLowerLeg" }, { "RightLowerLeg", "RightFoot" },
-		},
-		R6 = {
-			{ "Head", "Torso" }, { "Torso", "Left Arm" }, { "Torso", "Right Arm" },
-			{ "Torso", "Left Leg" }, { "Torso", "Right Leg" },
-		},
+	local R15_BONES = {
+		{ "Head", "UpperTorso" }, { "UpperTorso", "LowerTorso" },
+		{ "UpperTorso", "LeftUpperArm" }, { "LeftUpperArm", "LeftLowerArm" }, { "LeftLowerArm", "LeftHand" },
+		{ "UpperTorso", "RightUpperArm" }, { "RightUpperArm", "RightLowerArm" }, { "RightLowerArm", "RightHand" },
+		{ "LowerTorso", "LeftUpperLeg" }, { "LeftUpperLeg", "LeftLowerLeg" }, { "LeftLowerLeg", "LeftFoot" },
+		{ "LowerTorso", "RightUpperLeg" }, { "RightUpperLeg", "RightLowerLeg" }, { "RightLowerLeg", "RightFoot" },
+	}
+	local R6_BONES = {
+		{ "Head", "Torso" }, { "Torso", "Left Arm" }, { "Torso", "Right Arm" }, { "Torso", "Left Leg" }, { "Torso", "Right Leg" },
 	}
 
 	-- Positions a thin frame as a line between two screen points.
@@ -43,323 +1229,27 @@ do -- ESP (v7 rewrite: one Entry object per player, same visuals and same Config
 		frame.Visible = true
 	end
 
-	-- Screen rectangle around a character (scaled by `scale`). Returns nil if any corner is behind the camera.
-	local function boxBounds(camera, character, scale)
-		local cframe, size = character:GetBoundingBox()
-		local half = size / 2 * scale
-		local minX, minY, maxX, maxY = math.huge, math.huge, -math.huge, -math.huge
-		for sx = -1, 1, 2 do
-			for sy = -1, 1, 2 do
-				for sz = -1, 1, 2 do
-					local point = camera:WorldToViewportPoint(cframe:PointToWorldSpace(Vector3.new(half.X * sx, half.Y * sy, half.Z * sz)))
-					if point.Z <= 0 then return nil end
-					if point.X < minX then minX = point.X end
-					if point.X > maxX then maxX = point.X end
-					if point.Y < minY then minY = point.Y end
-					if point.Y > maxY then maxY = point.Y end
-				end
-			end
-		end
-		return minX, minY, maxX, maxY
+	local function hideEntry(entry)
+		entry.highlight.Enabled, entry.tag.Enabled = false, false
+		entry.tracer.Visible, entry.box.Visible = false, false
+		entry.barBack.Visible, entry.look.Visible = false, false
+		entry.arrow.Visible, entry.arrowLine.Visible = false, false
+		for _, bone in ipairs(entry.bones) do bone.Visible = false end
 	end
-
-	----------------------------------------------------------------------------
-	-- Entry: everything drawn for one player
-	----------------------------------------------------------------------------
-	local Entry = {}
-	Entry.__index = Entry
-
-	function Entry.new(target, character, head, humanoid)
-		local self = setmetatable({
-			target = target, character = character, head = head, humanoid = humanoid,
-			shown = false, clear = false, nextRay = 0, bones = {}, boneList = nil,
-			filter = nil, filterRoot = nil, lastInfo = nil, lastName = nil,
-		}, Entry)
-		local objects = {}
-		self.objects = objects
-		local function own(object) table.insert(objects, object) return object end
-
-		self.highlight = own(create("Highlight", {
-			Name = "ESPHighlight", Adornee = character, Enabled = false, FillTransparency = 0.82,
-			DepthMode = Enum.HighlightDepthMode.AlwaysOnTop,
-		}, character))
-
-		-- Tag: built at a fixed 150x48, shrunk by a UIScale (TAG SIZE), anchored at its bottom edge.
-		local tag = own(create("BillboardGui", {
-			Name = "ESPTag", Adornee = head, AlwaysOnTop = true, Enabled = false, LightInfluence = 0,
-			Size = UDim2.fromOffset(150, 48), StudsOffset = Vector3.new(0, 1.7, 0), SizeOffset = Vector2.new(0, 0.5),
-			MaxDistance = math.huge,
-		}, espFolder))
-		local card = create("Frame", {
-			AnchorPoint = Vector2.new(0.5, 1), Position = UDim2.fromScale(0.5, 1), Size = UDim2.fromScale(1, 1),
-			BackgroundTransparency = 0.35, BorderSizePixel = 0,
-		}, tag)
-		self.tag, self.card = tag, card
-		self.cardScale = create("UIScale", { Scale = Config.espTagScale }, card)
-		self.cardStroke = create("UIStroke", { Thickness = 1, Transparency = 0.2 }, card)
-		self.topLine = create("Frame", { Size = UDim2.new(1, 0, 0, 2), BorderSizePixel = 0 }, card)
-		self.nameLabel = create("TextLabel", {
-			Text = target.DisplayName, Font = Fonts.bold, TextSize = 14, BackgroundTransparency = 1,
-			Position = UDim2.fromOffset(0, 4), Size = UDim2.new(1, 0, 0, 16),
-		}, card)
-		self.nameStroke = create("UIStroke", { Thickness = 1.5 }, self.nameLabel)
-		self.track = create("Frame", {
-			Position = UDim2.fromOffset(10, 24), Size = UDim2.new(1, -20, 0, 8), BackgroundTransparency = 0.2, BorderSizePixel = 0,
-		}, card)
-		self.trackStroke = create("UIStroke", { Thickness = 1, Transparency = 0.3 }, self.track)
-		self.fill = create("Frame", { Size = UDim2.fromScale(1, 1), BorderSizePixel = 0 }, self.track)
-		self.info = create("TextLabel", {
-			Font = Fonts.regular, TextSize = 10, BackgroundTransparency = 1,
-			Position = UDim2.fromOffset(0, 34), Size = UDim2.new(1, 0, 0, 12),
-		}, card)
-		local diamond = create("Frame", {
-			AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.new(0.5, 0, 1, 0), Size = UDim2.fromOffset(8, 8),
-			Rotation = 45, BackgroundColor3 = GOLD, BorderSizePixel = 0,
-		}, card)
-		self.diamondStroke = create("UIStroke", { Thickness = 1.5, Transparency = 0.1 }, diamond)
-
-		-- Screen-space pieces (all live in the overlay gui).
-		local function pixel(properties)
-			properties.BorderSizePixel = 0
-			properties.Visible = false
-			return own(create("Frame", properties, overlay))
-		end
-		self.tracer = pixel({ AnchorPoint = Vector2.new(0.5, 0.5) })
-		self.box = pixel({ BackgroundTransparency = 1 })
-		self.boxStroke = create("UIStroke", { Thickness = 1.5, Transparency = 0.1 }, self.box)
-		self.barBack = pixel({ BackgroundTransparency = 0.35 })
-		self.barFill = create("Frame", {
-			AnchorPoint = Vector2.new(0, 1), Position = UDim2.fromScale(0, 1), Size = UDim2.fromScale(1, 1), BorderSizePixel = 0,
-		}, self.barBack)
-		self.look = pixel({ AnchorPoint = Vector2.new(0.5, 0.5) })
-		self.arrow = pixel({ AnchorPoint = Vector2.new(0.5, 0.5), Rotation = 45, Size = UDim2.fromOffset(14, 14) })
-		self.arrowStroke = create("UIStroke", { Color = Color3.new(1, 1, 1), Thickness = 1.5, Transparency = 0.2 }, self.arrow)
-		self.arrowLine = pixel({ AnchorPoint = Vector2.new(0.5, 0.5) })
-		return self
-	end
-
-	function Entry:hide()
-		if not self.shown then return end
-		self.shown = false
-		self.highlight.Enabled, self.tag.Enabled = false, false
-		self.tracer.Visible, self.box.Visible, self.barBack.Visible = false, false, false
-		self.look.Visible, self.arrow.Visible, self.arrowLine.Visible = false, false, false
-		for _, bone in ipairs(self.bones) do bone.Visible = false end
-	end
-
-	function Entry:destroy()
-		for _, object in ipairs(self.objects) do object:Destroy() end
-		for _, bone in ipairs(self.bones) do bone:Destroy() end
-		table.clear(self.objects)
-		table.clear(self.bones)
-	end
-
-	-- Bone parts are looked up once per character, not every frame.
-	function Entry:drawSkeleton(camera, color)
-		local list = self.boneList
-		if not list then
-			local rig = BONES[self.character:FindFirstChild("UpperTorso") and "R15" or "R6"]
-			list = {}
-			for _, pair in ipairs(rig) do
-				local a, b = self.character:FindFirstChild(pair[1]), self.character:FindFirstChild(pair[2])
-				if a and b and a:IsA("BasePart") and b:IsA("BasePart") then table.insert(list, { a, b }) end
-			end
-			self.boneList = list
-		end
-		local used = 0
-		for _, pair in ipairs(list) do
-			local a, b = pair[1], pair[2]
-			if a.Parent and b.Parent then
-				local pa = camera:WorldToViewportPoint(a.Position)
-				local pb = camera:WorldToViewportPoint(b.Position)
-				if pa.Z > 0 and pb.Z > 0 then
-					used += 1
-					local bone = self.bones[used]
-					if not bone then
-						bone = create("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), BorderSizePixel = 0 }, overlay)
-						self.bones[used] = bone
-					end
-					drawLine(bone, Vector2.new(pa.X, pa.Y), Vector2.new(pb.X, pb.Y), 1.5, color, 0.15)
-				end
-			end
-		end
-		for index = used + 1, #self.bones do self.bones[index].Visible = false end
-	end
-
-	function Entry:update(ctx)
-		local target, humanoid, head, character, camera = self.target, self.humanoid, self.head, self.character, ctx.camera
-		if not (head.Parent and humanoid.Parent) or humanoid.Health <= 0 then return self:hide() end
-
-		local headPos = head.Position
-		local distance = ctx.myRoot and (headPos - ctx.myRoot.Position).Magnitude or 0
-		if (Config.espTeamCheck and isTeammate(target)) or (Config.espMaxDist < 5000 and distance > Config.espMaxDist) then
-			return self:hide()
-		end
-
-		-- Line of sight, refreshed a few times a second per player instead of every frame.
-		local clear = false
-		if Config.charms or Config.tracers or Config.espVisibleOnly then
-			if ctx.now >= self.nextRay then
-				self.nextRay = ctx.now + RAY_INTERVAL
-				if self.filterRoot ~= ctx.myChar then
-					self.filterRoot = ctx.myChar
-					self.filter = ctx.myChar and { character, ctx.myChar } or { character }
-				end
-				rayParams.FilterDescendantsInstances = self.filter
-				local from = camera.CFrame.Position
-				self.clear = workspace:Raycast(from, headPos - from, rayParams) == nil
-			end
-			clear = self.clear
-		end
-		if Config.espVisibleOnly and not clear then return self:hide() end
-		self.shown = true
-
-		-- Colour: rainbow, then team colour, then the theme accent. Clear sight is gold, the aimlock target is red.
-		local custom = Config.espRainbow or (Config.espTeamColor and target.Team ~= nil)
-		local base = Colors.accent
-		if Config.espRainbow then
-			base = ctx.rainbow
-		elseif Config.espTeamColor and target.Team then
-			base = target.TeamColor.Color
-		end
-		local locked = Actions.lockedCharacter == character
-		local tint = locked and RED or (clear and GOLD or base)
-
-		local highlight = self.highlight
-		highlight.Enabled = true
-		if Config.charms then
-			highlight.FillColor, highlight.FillTransparency, highlight.OutlineColor = tint, 0.25, tint
-		else
-			highlight.FillColor, highlight.FillTransparency = base, 0.82
-			highlight.OutlineColor = locked and RED or (custom and base or Colors.line)
-		end
-		highlight.OutlineTransparency = 0.05 + 0.5 * (1 - Config.glow)
-
-		local ratio = math.clamp(humanoid.Health / math.max(humanoid.MaxHealth, 1), 0, 1)
-		local point, onScreen = camera:WorldToViewportPoint(headPos)
-
-		-- Tracer
-		if Config.tracers and onScreen then
-			drawLine(self.tracer, ctx.origin, Vector2.new(point.X, point.Y), 2, tint, 0.2 + 0.6 * (1 - Config.glow))
-		else
-			self.tracer.Visible = false
-		end
-
-		-- Box and health bar share one bounding rectangle.
-		local minX, minY, maxX, maxY
-		if Config.espBox or Config.espHealthBar then
-			minX, minY, maxX, maxY = boxBounds(camera, character, Config.espBoxScale)
-		end
-		if Config.espBox and minX then
-			local box = self.box
-			box.Position = UDim2.fromOffset(minX, minY)
-			box.Size = UDim2.fromOffset(maxX - minX, maxY - minY)
-			self.boxStroke.Color = tint
-			box.Visible = true
-		else
-			self.box.Visible = false
-		end
-		if Config.espHealthBar and minX then
-			local back = self.barBack
-			back.Position = UDim2.fromOffset(minX - 7, minY)
-			back.Size = UDim2.fromOffset(4, maxY - minY)
-			back.BackgroundColor3 = Colors.panel
-			self.barFill.Size = UDim2.fromScale(1, ratio)
-			self.barFill.BackgroundColor3 = Color3.fromHSV(ratio * 0.33, 0.85, 1)
-			back.Visible = true
-		else
-			self.barBack.Visible = false
-		end
-
-		-- Skeleton
-		if Config.espSkeleton then
-			self:drawSkeleton(camera, tint)
-		elseif #self.bones > 0 and self.bones[1].Visible then
-			for _, bone in ipairs(self.bones) do bone.Visible = false end
-		end
-
-		-- Look line: where the head is facing.
-		if Config.espLook then
-			local from = camera:WorldToViewportPoint(headPos)
-			local to = camera:WorldToViewportPoint(headPos + head.CFrame.LookVector * 6)
-			if from.Z > 0 and to.Z > 0 then
-				drawLine(self.look, Vector2.new(from.X, from.Y), Vector2.new(to.X, to.Y), 2, tint, 0.2)
-			else
-				self.look.Visible = false
-			end
-		else
-			self.look.Visible = false
-		end
-
-		-- Off-screen arrow near the screen edge, pulsing.
-		if Config.espArrows and not onScreen then
-			local offset = camera.CFrame:PointToObjectSpace(headPos)
-			local direction = Vector2.new(offset.X, -offset.Y)
-			direction = direction.Magnitude > 0.001 and direction.Unit or Vector2.new(0, 1)
-			local center = ctx.screen / 2
-			local tip = center + Vector2.new(direction.X * (center.X - 50), direction.Y * (center.Y - 50))
-			local pulse = 12 + 4 * math.sin(ctx.now * 6)
-			local arrow = self.arrow
-			arrow.Position = UDim2.fromOffset(tip.X, tip.Y)
-			arrow.Size = UDim2.fromOffset(pulse, pulse)
-			arrow.BackgroundColor3, self.arrowStroke.Color = tint, Colors.text
-			arrow.Visible = true
-			drawLine(self.arrowLine, tip - direction * 22, tip, 2, tint, 0.2)
-		else
-			self.arrow.Visible, self.arrowLine.Visible = false, false
-		end
-
-		-- Tag
-		local tag = self.tag
-		tag.Enabled = ctx.anyText
-		if ctx.anyText then
-			self.cardScale.Scale = Config.espTagScale
-			local card = self.card
-			card.BackgroundColor3, card.BackgroundTransparency = Colors.panel, Config.espTagBg
-			self.cardStroke.Color = custom and base or Colors.line
-			self.topLine.BackgroundColor3 = base
-			self.topLine.BackgroundTransparency = ctx.lineTransparency
-			local nameLabel = self.nameLabel
-			nameLabel.TextColor3 = Colors.text
-			nameLabel.Visible = Config.espNames
-			if self.lastName ~= target.DisplayName then
-				self.lastName = target.DisplayName
-				nameLabel.Text = target.DisplayName
-			end
-			self.nameStroke.Color, self.nameStroke.Transparency = base, ctx.strokeTransparency
-			self.track.BackgroundColor3, self.trackStroke.Color = Colors.panel, Colors.line
-			self.track.Visible = Config.espHealth
-			self.fill.Size = UDim2.fromScale(ratio, 1)
-			self.fill.BackgroundColor3 = ratio < 0.3 and RED or Colors.text
-			self.diamondStroke.Color = locked and RED or base
-
-			local text = ""
-			if Config.espDist and ctx.myRoot then text = string.format("%d studs", math.floor(distance)) end
-			if Config.espHealth then
-				local hp = string.format("%d HP", math.floor(humanoid.Health))
-				text = text ~= "" and (text .. "  |  " .. hp) or hp
-			end
-			local info = self.info
-			info.Visible = text ~= ""
-			info.TextColor3 = Colors.muted
-			if self.lastInfo ~= text then
-				self.lastInfo = text
-				info.Text = text
-			end
-		end
-	end
-
-	----------------------------------------------------------------------------
-	-- Tracking players
-	----------------------------------------------------------------------------
-	local entries = {}
 
 	local function removeEntry(target)
 		local entry = entries[target]
-		if entry then
-			entries[target] = nil
-			entry:destroy()
-		end
+		if not entry then return end
+		entries[target] = nil
+		entry.highlight:Destroy()
+		entry.tag:Destroy()
+		entry.tracer:Destroy()
+		entry.box:Destroy()
+		entry.barBack:Destroy()
+		entry.look:Destroy()
+		entry.arrow:Destroy()
+		entry.arrowLine:Destroy()
+		for _, bone in ipairs(entry.bones) do bone:Destroy() end
 	end
 
 	local function addEntry(target, character)
@@ -367,7 +1257,74 @@ do -- ESP (v7 rewrite: one Entry object per player, same visuals and same Config
 		local humanoid = character:WaitForChild("Humanoid", 5)
 		if not (head and humanoid) or target.Character ~= character then return end
 		removeEntry(target)
-		entries[target] = Entry.new(target, character, head, humanoid)
+
+		local highlight = create("Highlight", {
+			Name = "ESPHighlight", Adornee = character, Enabled = false, FillTransparency = 0.82,
+			DepthMode = Enum.HighlightDepthMode.AlwaysOnTop,
+		}, character)
+
+		-- The tag is built at a fixed 150x48 and shrunk with a UIScale (TAG SIZE slider).
+		-- It is anchored at its bottom edge so it stays tight over the head at any scale.
+		local tag = create("BillboardGui", {
+			Name = "ESPTag", Adornee = head, AlwaysOnTop = true, Enabled = false, LightInfluence = 0,
+			Size = UDim2.fromOffset(150, 48), StudsOffset = Vector3.new(0, 1.7, 0), SizeOffset = Vector2.new(0, 0.5),
+			MaxDistance = math.huge,
+		}, espFolder)
+		local card = create("Frame", {
+			AnchorPoint = Vector2.new(0.5, 1), Position = UDim2.fromScale(0.5, 1), Size = UDim2.fromScale(1, 1),
+			BackgroundTransparency = 0.35, BorderSizePixel = 0,
+		}, tag)
+		local cardScale = create("UIScale", { Scale = Config.espTagScale }, card)
+		local cardStroke = create("UIStroke", { Thickness = 1, Transparency = 0.2 }, card)
+		local topLine = create("Frame", { Size = UDim2.new(1, 0, 0, 2), BorderSizePixel = 0 }, card)
+		local nameLabel = create("TextLabel", {
+			Text = target.DisplayName, Font = Fonts.bold, TextSize = 14, BackgroundTransparency = 1,
+			Position = UDim2.fromOffset(0, 4), Size = UDim2.new(1, 0, 0, 16),
+		}, card)
+		local nameStroke = create("UIStroke", { Thickness = 1.5 }, nameLabel)
+		local track = create("Frame", {
+			Position = UDim2.fromOffset(10, 24), Size = UDim2.new(1, -20, 0, 8), BackgroundTransparency = 0.2, BorderSizePixel = 0,
+		}, card)
+		local trackStroke = create("UIStroke", { Thickness = 1, Transparency = 0.3 }, track)
+		local fill = create("Frame", { Size = UDim2.fromScale(1, 1), BorderSizePixel = 0 }, track)
+		local info = create("TextLabel", {
+			Font = Fonts.regular, TextSize = 10, BackgroundTransparency = 1,
+			Position = UDim2.fromOffset(0, 34), Size = UDim2.new(1, 0, 0, 12),
+		}, card)
+		local diamond = create("Frame", {
+			AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.new(0.5, 0, 1, 0), Size = UDim2.fromOffset(8, 8),
+			Rotation = 45, BackgroundColor3 = GOLD, BorderSizePixel = 0,
+		}, card)
+		local diamondStroke = create("UIStroke", { Thickness = 1.5, Transparency = 0.1 }, diamond)
+
+		local tracer = create("Frame", {
+			AnchorPoint = Vector2.new(0.5, 0.5), BorderSizePixel = 0, Visible = false,
+		}, tracerGui)
+
+		local box = create("Frame", { BackgroundTransparency = 1, BorderSizePixel = 0, Visible = false }, tracerGui)
+		local boxStroke = create("UIStroke", { Thickness = 1.5, Transparency = 0.1 }, box)
+
+		-- New: health bar beside the box, look line, off-screen arrow (tip + tail).
+		local barBack = create("Frame", { BorderSizePixel = 0, BackgroundTransparency = 0.35, Visible = false }, tracerGui)
+		local barFill = create("Frame", {
+			AnchorPoint = Vector2.new(0, 1), Position = UDim2.fromScale(0, 1), Size = UDim2.fromScale(1, 1), BorderSizePixel = 0,
+		}, barBack)
+		local look = create("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), BorderSizePixel = 0, Visible = false }, tracerGui)
+		local arrow = create("Frame", {
+			AnchorPoint = Vector2.new(0.5, 0.5), Rotation = 45, Size = UDim2.fromOffset(14, 14), BorderSizePixel = 0, Visible = false,
+		}, tracerGui)
+		local arrowStroke = create("UIStroke", { Color = Color3.new(1, 1, 1), Thickness = 1.5, Transparency = 0.2 }, arrow)
+		local arrowLine = create("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), BorderSizePixel = 0, Visible = false }, tracerGui)
+
+		entries[target] = {
+			highlight = highlight, tag = tag, head = head, humanoid = humanoid,
+			character = character, tracer = tracer, box = box, boxStroke = boxStroke,
+			card = card, cardScale = cardScale, cardStroke = cardStroke, topLine = topLine,
+			nameLabel = nameLabel, nameStroke = nameStroke,
+			track = track, trackStroke = trackStroke, fill = fill, info = info, diamondStroke = diamondStroke,
+			barBack = barBack, barFill = barFill, look = look, arrow = arrow, arrowStroke = arrowStroke,
+			arrowLine = arrowLine, bones = {},
+		}
 	end
 
 	local function watch(target)
@@ -380,35 +1337,2823 @@ do -- ESP (v7 rewrite: one Entry object per player, same visuals and same Config
 	Players.PlayerAdded:Connect(watch)
 	Players.PlayerRemoving:Connect(removeEntry)
 
-	----------------------------------------------------------------------------
-	-- Frame loop
-	----------------------------------------------------------------------------
-	local ctx = {} -- reused every frame
-	local applied = false
+	-- Screen-space rectangle around a character, shrunk or grown by `scale`. Nil when any corner is behind the camera.
+	local function boxBounds(camera, character, scale)
+		local cframe, size = character:GetBoundingBox()
+		local half = size / 2 * scale
+		local minX, minY, maxX, maxY = math.huge, math.huge, -math.huge, -math.huge
+		for _, sx in ipairs({ -1, 1 }) do
+			for _, sy in ipairs({ -1, 1 }) do
+				for _, sz in ipairs({ -1, 1 }) do
+					local point = camera:WorldToViewportPoint(cframe:PointToWorldSpace(Vector3.new(half.X * sx, half.Y * sy, half.Z * sz)))
+					if point.Z <= 0 then return nil end
+					minX, maxX = math.min(minX, point.X), math.max(maxX, point.X)
+					minY, maxY = math.min(minY, point.Y), math.max(maxY, point.Y)
+				end
+			end
+		end
+		return minX, minY, maxX, maxY
+	end
 
+	-- Draws the bone lines for one character (R15 or R6), reusing a pool of frames.
+	local function drawSkeleton(entry, camera, color)
+		local character = entry.character
+		local list = character:FindFirstChild("UpperTorso") and R15_BONES or R6_BONES
+		local used = 0
+		for _, pair in ipairs(list) do
+			local a, b = character:FindFirstChild(pair[1]), character:FindFirstChild(pair[2])
+			if a and b and a:IsA("BasePart") and b:IsA("BasePart") then
+				local pa = camera:WorldToViewportPoint(a.Position)
+				local pb = camera:WorldToViewportPoint(b.Position)
+				if pa.Z > 0 and pb.Z > 0 then
+					used += 1
+					local bone = entry.bones[used]
+					if not bone then
+						bone = create("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), BorderSizePixel = 0 }, tracerGui)
+						entry.bones[used] = bone
+					end
+					drawLine(bone, Vector2.new(pa.X, pa.Y), Vector2.new(pb.X, pb.Y), 1.5, color, 0.15)
+				end
+			end
+		end
+		for index = used + 1, #entry.bones do entry.bones[index].Visible = false end
+	end
+
+	local espApplied = false
 	RunService.RenderStepped:Connect(function()
 		if not Config.esp then
-			if applied then
-				applied = false
-				for _, entry in pairs(entries) do entry:hide() end
+			if espApplied then
+				espApplied = false
+				for _, entry in pairs(entries) do hideEntry(entry) end
 			end
 			return
 		end
-		applied = true
+		espApplied = true
 
 		local camera = workspace.CurrentCamera
 		if not camera then return end
+		local myChar = player.Character
 		local _, myRoot = getParts()
-		local screen = camera.ViewportSize
+		local anyText = Config.espNames or Config.espHealth or Config.espDist
+		local lineTransparency = 1 - 0.85 * Config.glow
+		local strokeTransparency = 1 - 0.5 * Config.glow
+		local screenSize = camera.ViewportSize
+		local origin = Vector2.new(screenSize.X / 2, screenSize.Y)
+		local rainbow = Color3.fromHSV((os.clock() * 0.2) % 1, 0.75, 1)
 
-		ctx.camera, ctx.myChar, ctx.myRoot = camera, player.Character, myRoot
-		ctx.now = os.clock()
-		ctx.screen, ctx.origin = screen, Vector2.new(screen.X / 2, screen.Y)
-		ctx.rainbow = Color3.fromHSV((ctx.now * 0.2) % 1, 0.75, 1)
-		ctx.anyText = Config.espNames or Config.espHealth or Config.espDist
-		ctx.lineTransparency = 1 - 0.85 * Config.glow
-		ctx.strokeTransparency = 1 - 0.5 * Config.glow
+		for target, entry in pairs(entries) do
+			local distance = myRoot and (entry.head.Position - myRoot.Position).Magnitude or 0
+			local hidden = (Config.espTeamCheck and isTeammate(target))
+				or (Config.espMaxDist < 5000 and distance > Config.espMaxDist)
+			if hidden then
+				hideEntry(entry)
+				continue
+			end
 
-		for _, entry in pairs(entries) do entry:update(ctx) end
+			local clear = false
+			if Config.charms or Config.tracers or Config.espVisibleOnly then
+				local filter = { entry.character }
+				if myChar then table.insert(filter, myChar) end
+				rayParams.FilterDescendantsInstances = filter
+				local from = camera.CFrame.Position
+				clear = workspace:Raycast(from, entry.head.Position - from, rayParams) == nil
+			end
+			if Config.espVisibleOnly and not clear then
+				hideEntry(entry)
+				continue
+			end
+
+			local highlight = entry.highlight
+			highlight.Enabled = true
+
+			-- Base colour: rainbow, then team colour, then the theme accent. The aimlock target is red.
+			local custom = Config.espRainbow or (Config.espTeamColor and target.Team ~= nil)
+			local base = Colors.accent
+			if Config.espRainbow then
+				base = rainbow
+			elseif Config.espTeamColor and target.Team then
+				base = target.TeamColor.Color
+			end
+			local tint = clear and GOLD or base
+			local locked = Actions.lockedCharacter == entry.character
+			if locked then tint = RED end
+
+			if Config.charms then
+				highlight.FillColor, highlight.FillTransparency = tint, 0.25
+				highlight.OutlineColor = tint
+			else
+				highlight.FillColor, highlight.FillTransparency = base, 0.82
+				highlight.OutlineColor = locked and RED or (custom and base or Colors.line)
+			end
+			highlight.OutlineTransparency = 0.05 + 0.5 * (1 - Config.glow)
+
+			local humanoid = entry.humanoid
+			local ratio = math.clamp(humanoid.Health / math.max(humanoid.MaxHealth, 1), 0, 1)
+
+			local tracer = entry.tracer
+			local point, onScreen = camera:WorldToViewportPoint(entry.head.Position)
+			if Config.tracers and onScreen then
+				drawLine(tracer, origin, Vector2.new(point.X, point.Y), 2, tint, 0.2 + 0.6 * (1 - Config.glow))
+			else
+				tracer.Visible = false
+			end
+
+			-- Box and health bar share one bounding rectangle.
+			local minX, minY, maxX, maxY
+			if Config.espBox or Config.espHealthBar then
+				minX, minY, maxX, maxY = boxBounds(camera, entry.character, Config.espBoxScale)
+			end
+			local box = entry.box
+			if Config.espBox and minX then
+				box.Position = UDim2.fromOffset(minX, minY)
+				box.Size = UDim2.fromOffset(maxX - minX, maxY - minY)
+				entry.boxStroke.Color = tint
+				box.Visible = true
+			else
+				box.Visible = false
+			end
+			if Config.espHealthBar and minX then
+				entry.barBack.Position = UDim2.fromOffset(minX - 7, minY)
+				entry.barBack.Size = UDim2.fromOffset(4, maxY - minY)
+				entry.barBack.BackgroundColor3 = Colors.panel
+				entry.barFill.Size = UDim2.fromScale(1, ratio)
+				entry.barFill.BackgroundColor3 = Color3.fromHSV(ratio * 0.33, 0.85, 1)
+				entry.barBack.Visible = true
+			else
+				entry.barBack.Visible = false
+			end
+
+			if Config.espSkeleton then
+				drawSkeleton(entry, camera, tint)
+			else
+				for _, bone in ipairs(entry.bones) do bone.Visible = false end
+			end
+
+			-- Look line: where the player's head is facing.
+			if Config.espLook then
+				local from = camera:WorldToViewportPoint(entry.head.Position)
+				local to = camera:WorldToViewportPoint(entry.head.Position + entry.head.CFrame.LookVector * 6)
+				if from.Z > 0 and to.Z > 0 then
+					drawLine(entry.look, Vector2.new(from.X, from.Y), Vector2.new(to.X, to.Y), 2, tint, 0.2)
+				else
+					entry.look.Visible = false
+				end
+			else
+				entry.look.Visible = false
+			end
+
+			-- Off-screen arrow on an ellipse near the screen edge, pulsing.
+			if Config.espArrows and not onScreen then
+				local offset = camera.CFrame:PointToObjectSpace(entry.head.Position)
+				local direction = Vector2.new(offset.X, -offset.Y)
+				direction = direction.Magnitude > 0.001 and direction.Unit or Vector2.new(0, 1)
+				local center = screenSize / 2
+				local tip = center + Vector2.new(direction.X * (center.X - 50), direction.Y * (center.Y - 50))
+				local pulse = 12 + 4 * math.sin(os.clock() * 6)
+				entry.arrow.Position = UDim2.fromOffset(tip.X, tip.Y)
+				entry.arrow.Size = UDim2.fromOffset(pulse, pulse)
+				entry.arrow.BackgroundColor3, entry.arrowStroke.Color = tint, Colors.text
+				entry.arrow.Visible = true
+				drawLine(entry.arrowLine, tip - direction * 22, tip, 2, tint, 0.2)
+			else
+				entry.arrow.Visible, entry.arrowLine.Visible = false, false
+			end
+
+			entry.tag.Enabled = anyText
+			if anyText then
+				entry.cardScale.Scale = Config.espTagScale
+				entry.card.BackgroundColor3 = Colors.panel
+				entry.card.BackgroundTransparency = Config.espTagBg
+				entry.cardStroke.Color = custom and base or Colors.line
+				entry.topLine.BackgroundColor3 = base
+				entry.topLine.BackgroundTransparency = lineTransparency
+				entry.nameLabel.TextColor3 = Colors.text
+				entry.nameLabel.Visible = Config.espNames
+				entry.nameStroke.Color = base
+				entry.nameStroke.Transparency = strokeTransparency
+				entry.track.BackgroundColor3 = Colors.panel
+				entry.trackStroke.Color = Colors.line
+				entry.track.Visible = Config.espHealth
+				entry.fill.Size = UDim2.fromScale(ratio, 1)
+				entry.fill.BackgroundColor3 = ratio < 0.3 and RED or Colors.text
+				entry.diamondStroke.Color = locked and RED or base
+
+				local parts = {}
+				if Config.espDist and myRoot then
+					table.insert(parts, string.format("%d studs", math.floor(distance)))
+				end
+				if Config.espHealth then
+					table.insert(parts, string.format("%d HP", math.floor(humanoid.Health)))
+				end
+				entry.info.Visible = #parts > 0
+				entry.info.TextColor3 = Colors.muted
+				entry.info.Text = table.concat(parts, "  |  ")
+			end
+		end
 	end)
 end
+
+do -- Aimlock (v5)
+	-- Locks onto a PLAYER (not a body part), so a respawn or a missing limb never drops the lock.
+	-- It runs at the very last render priority, so it writes the camera after every other camera script.
+	-- While locked it can take over the camera (OVERRIDE CAM) so the default camera cannot fight it.
+	Config.aimlock, Config.aimPing, Config.aimWhitelist, Config.aimWalls = false, true, false, false
+	Config.aimTeamCheck, Config.aimFovCircle = false, false
+	Config.aimToggleMode, Config.aimSticky, Config.aimSkipShield, Config.aimMarker = false, true, true, true
+	Config.aimHard, Config.aimOverride = false, true
+	Config.aimKey = Enum.KeyCode.Q
+	Config.aimPart = "Head"
+	Config.aimSmooth = 0.6
+	Config.aimPingScale = 1
+	Config.aimRadius = 250
+	Config.aimPriority = 1 -- 1 = nearest crosshair, 2 = nearest body, 3 = lowest health
+	Config.aimMaxDist = 1500
+	Config.aimGrace = 0.5
+	Config.whitelist = {}
+	LIMITS.aimPriority, LIMITS.aimMaxDist, LIMITS.aimGrace = { 1, 3 }, { 100, 5000 }, { 0, 2 }
+
+	local lockedPlayer, lostAt
+	local toggled = false
+	local takenCamera, savedType, followOffset
+	local pingSeconds, pingClock = 0, 0
+	local wallParams = RaycastParams.new()
+	wallParams.FilterType = Enum.RaycastFilterType.Exclude
+
+	-- Ring showing the lock radius, and the marker that sits on the locked target.
+	local fovGui = create("ScreenGui", {
+		Name = "FlightAimFov", ResetOnSpawn = false, IgnoreGuiInset = true, DisplayOrder = 4,
+		ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+	}, playerGui)
+	local fovRing = create("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0.5), Rotation = 45, BackgroundTransparency = 1, BorderSizePixel = 0, Visible = false,
+	}, fovGui)
+	bind(create("UIStroke", { Thickness = 1.5, Transparency = 0.35 }, fovRing), "Color", "line")
+
+	local marker = create("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0.5), Size = UDim2.fromOffset(24, 24), BackgroundTransparency = 1,
+		BorderSizePixel = 0, Visible = false,
+	}, fovGui)
+	bind(create("UIStroke", { Thickness = 2, Transparency = 0.1 }, marker), "Color", "trim")
+	create("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(6, 6),
+		BackgroundColor3 = RED, BorderSizePixel = 0,
+	}, marker)
+
+	local function targetAllowed(other)
+		if other == player then return false end
+		if Config.aimTeamCheck and isTeammate(other) then return false end
+		return not Config.aimWhitelist or Config.whitelist[other.UserId] == true
+	end
+
+	-- Returns the aim part, the character and the humanoid, or nil when the player is not a valid target.
+	local function validPart(other)
+		local character = other.Character
+		local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+		local part = character and (character:FindFirstChild(Config.aimPart) or character:FindFirstChild("HumanoidRootPart"))
+		if not (humanoid and part and humanoid.Health > 0) then return nil end
+		if Config.aimSkipShield and character:FindFirstChildOfClass("ForceField") then return nil end
+		return part, character, humanoid
+	end
+
+	local function visible(part, character, camera)
+		if not Config.aimWalls then return true end
+		local filter = { character }
+		if player.Character then table.insert(filter, player.Character) end
+		wallParams.FilterDescendantsInstances = filter
+		local from = camera.CFrame.Position
+		return workspace:Raycast(from, part.Position - from, wallParams) == nil
+	end
+
+	-- The aim part of `other` if they can be locked right now, otherwise nil.
+	local function usable(other, camera)
+		if not targetAllowed(other) then return nil end
+		local part, character = validPart(other)
+		if not part then return nil end
+		if (part.Position - camera.CFrame.Position).Magnitude > Config.aimMaxDist then return nil end
+		if not visible(part, character, camera) then return nil end
+		return part
+	end
+
+	local function aimCenter(camera)
+		return UserInputService.MouseBehavior == Enum.MouseBehavior.LockCenter
+			and camera.ViewportSize / 2 or UserInputService:GetMouseLocation()
+	end
+
+	-- Lowest score wins: screen distance, world distance or current health, depending on TARGET PRIORITY.
+	local function pickTarget(camera)
+		local center = aimCenter(camera)
+		local best, bestScore = nil, math.huge
+		for _, other in ipairs(Players:GetPlayers()) do
+			if targetAllowed(other) then
+				local part, character, humanoid = validPart(other)
+				if part then
+					local worldDistance = (part.Position - camera.CFrame.Position).Magnitude
+					local point, onScreen = camera:WorldToViewportPoint(part.Position)
+					if onScreen and worldDistance <= Config.aimMaxDist then
+						local screenDistance = (Vector2.new(point.X, point.Y) - center).Magnitude
+						if screenDistance <= Config.aimRadius and visible(part, character, camera) then
+							local score = screenDistance
+							if Config.aimPriority == 2 then
+								score = worldDistance
+							elseif Config.aimPriority == 3 then
+								score = humanoid.Health
+							end
+							if score < bestScore then best, bestScore = other, score end
+						end
+					end
+				end
+			end
+		end
+		return best
+	end
+
+	-- OVERRIDE CAM: while locked the camera is set to Scriptable so the default camera script stops writing to it.
+	-- A Scriptable camera does not follow the character, so the offset from the character is kept by hand.
+	local function takeCamera(camera, rootPart)
+		if takenCamera ~= camera then
+			takenCamera, savedType = camera, camera.CameraType
+			followOffset = (rootPart and savedType ~= Enum.CameraType.Scriptable)
+				and camera.CFrame.Position - rootPart.Position or nil
+		end
+		if camera.CameraType ~= Enum.CameraType.Scriptable then
+			camera.CameraType = Enum.CameraType.Scriptable
+		end
+	end
+
+	local function releaseCamera()
+		local camera = takenCamera
+		takenCamera, followOffset = nil, nil
+		if camera and camera.Parent and savedType and savedType ~= Enum.CameraType.Scriptable
+			and camera.CameraType == Enum.CameraType.Scriptable then
+			camera.CameraType = savedType
+		end
+	end
+
+	-- TOGGLE MODE: the aim key flips the lock on and off.
+	UserInputService.InputBegan:Connect(function(input, processed)
+		if processed or listening or introPlaying or not Config.aimToggleMode then return end
+		if input.KeyCode == Config.aimKey then toggled = not toggled end
+	end)
+
+	RunService:BindToRenderStep("FlightAimlock", Enum.RenderPriority.Last.Value, function(dt)
+		local camera = workspace.CurrentCamera
+
+		local showRing = Config.aimFovCircle and Config.aimlock and camera ~= nil and not introPlaying
+		fovRing.Visible = showRing
+		if showRing then
+			local center = aimCenter(camera)
+			fovRing.Position = UDim2.fromOffset(center.X, center.Y)
+			local side = Config.aimRadius * 2 / 1.4142 -- diamond whose tips sit on the lock radius
+			fovRing.Size = UDim2.fromOffset(side, side)
+		end
+
+		if not Config.aimToggleMode then toggled = false end
+		local pressed
+		if Config.aimToggleMode then
+			pressed = toggled
+		else
+			pressed = UserInputService:IsKeyDown(Config.aimKey)
+		end
+		local humanoid, myRoot = getParts()
+		local active = Config.aimlock and camera and humanoid and humanoid.Health > 0 and not introPlaying
+			and not UserInputService:GetFocusedTextBox() and pressed
+		if not active then
+			lockedPlayer, lostAt, Actions.lockedCharacter = nil, nil, nil
+			marker.Visible = false
+			releaseCamera()
+			return
+		end
+
+		if takenCamera and takenCamera ~= camera then releaseCamera() end
+
+		-- Keep the same player across respawns; drop them only if they left or are no longer allowed.
+		if lockedPlayer and (lockedPlayer.Parent ~= Players or not targetAllowed(lockedPlayer)) then
+			lockedPlayer, lostAt = nil, nil
+		end
+		if not Config.aimSticky then lockedPlayer, lostAt = nil, nil end
+
+		local part = lockedPlayer and usable(lockedPlayer, camera)
+		if part then
+			lostAt = nil
+		elseif lockedPlayer then
+			-- Dead, hidden or between respawns: hold on for the grace time, then pick someone new.
+			lostAt = lostAt or os.clock()
+			if os.clock() - lostAt > Config.aimGrace then lockedPlayer, lostAt = nil, nil end
+		end
+		if not lockedPlayer then
+			lockedPlayer = pickTarget(camera)
+			part = lockedPlayer and usable(lockedPlayer, camera)
+		end
+		Actions.lockedCharacter = lockedPlayer and lockedPlayer.Character or nil
+
+		if not lockedPlayer then
+			marker.Visible = false
+			releaseCamera()
+			return
+		end
+
+		-- Camera control: take it (so nothing else can move it) or just write last.
+		local current = camera.CFrame
+		if Config.aimOverride then
+			takeCamera(camera, myRoot)
+			if followOffset and myRoot then current = CFrame.new(myRoot.Position + followOffset) * current.Rotation end
+		else
+			releaseCamera()
+		end
+
+		if not part then
+			-- Grace period: keep the view where it is.
+			marker.Visible = false
+			camera.CFrame = current
+			return
+		end
+
+		-- Spinning marker on the target.
+		local screenPoint, onScreen = camera:WorldToViewportPoint(part.Position)
+		marker.Visible = Config.aimMarker and onScreen
+		marker.Position = UDim2.fromOffset(screenPoint.X, screenPoint.Y)
+		marker.Rotation = (os.clock() * 120) % 360
+
+		if os.clock() - pingClock > 0.5 then
+			pingClock = os.clock()
+			local ok, seconds = pcall(function() return player:GetNetworkPing() end)
+			if ok and typeof(seconds) == "number" then pingSeconds = seconds end
+		end
+
+		local aimPoint = part.Position
+		if Config.aimPing then
+			aimPoint += part.AssemblyLinearVelocity * pingSeconds * Config.aimPingScale
+		end
+
+		local goal = CFrame.lookAt(current.Position, aimPoint)
+		if Config.aimHard or Config.aimSmooth <= 0 then
+			camera.CFrame = goal -- HARD LOCK: exact aim every frame
+		else
+			camera.CFrame = current:Lerp(goal, 1 - Config.aimSmooth ^ (dt * 60))
+		end
+	end)
+end
+
+do -- Movement, camera and utility
+	local speedCap = role.caps and role.caps.walkSpeed or math.huge
+	local sprintBase, lastSafe
+	local savedMaxZoom = player.CameraMaxZoomDistance
+	local afkConnection
+	local waypoints = {}
+	Actions.viewing = nil
+	Actions.waypoints = waypoints
+
+	-- Handlers for toggles that change something outside this script.
+	Handlers.freeze = function(enabled)
+		local _, rootPart = getParts()
+		if rootPart then rootPart.Anchored = enabled end
+	end
+	Handlers.unlockZoom = function(enabled)
+		player.CameraMaxZoomDistance = enabled and 100000 or savedMaxZoom
+	end
+	Handlers.firstPerson = function(enabled)
+		player.CameraMode = enabled and Enum.CameraMode.LockFirstPerson or Enum.CameraMode.Classic
+	end
+	Handlers.zoom = function(enabled)
+		local camera = workspace.CurrentCamera
+		if camera and not enabled then camera.FieldOfView = Config.fov end
+	end
+	Handlers.antiAfk = function(enabled)
+		if enabled and not afkConnection then
+			afkConnection = player.Idled:Connect(function()
+				pcall(function()
+					local virtualUser = game:GetService("VirtualUser")
+					virtualUser:CaptureController()
+					virtualUser:ClickButton2(Vector2.zero)
+				end)
+			end)
+		elseif not enabled and afkConnection then
+			afkConnection:Disconnect()
+			afkConnection = nil
+		end
+	end
+
+	-- Per-frame movement features.
+	RunService.Heartbeat:Connect(function(dt)
+		local humanoid, rootPart = getParts()
+		if not (humanoid and rootPart) then return end
+
+		if Config.keepStats then
+			if not sprintBase then humanoid.WalkSpeed = Config.walkSpeed end
+			humanoid.UseJumpPower = true
+			humanoid.JumpPower = Config.jumpPower
+		end
+
+		-- SPRINT: hold Left Shift to multiply the current walk speed (members stay under their walk cap).
+		if Config.sprint and not Config.flying and isDown(Enum.KeyCode.LeftShift) then
+			sprintBase = sprintBase or humanoid.WalkSpeed
+			humanoid.WalkSpeed = math.max(sprintBase, math.min(sprintBase * Config.sprintMult, speedCap))
+		elseif sprintBase then
+			humanoid.WalkSpeed = sprintBase
+			sprintBase = nil
+		end
+
+		if Config.bhop and not Config.flying and isDown(Enum.KeyCode.Space)
+			and humanoid.FloorMaterial ~= Enum.Material.Air then
+			humanoid.Jump = true
+		end
+
+		if Config.glide and not Config.flying then
+			local current = rootPart.AssemblyLinearVelocity
+			if current.Y < -Config.glideSpeed then
+				rootPart.AssemblyLinearVelocity = Vector3.new(current.X, -Config.glideSpeed, current.Z)
+			end
+		end
+
+		if Config.antiVoid then
+			local floorY = workspace.FallenPartsDestroyHeight + 60
+			if humanoid.FloorMaterial ~= Enum.Material.Air and rootPart.Position.Y > floorY then
+				lastSafe = rootPart.CFrame
+			elseif lastSafe and rootPart.Position.Y < floorY then
+				rootPart.CFrame = lastSafe + Vector3.new(0, 4, 0)
+				rootPart.AssemblyLinearVelocity = Vector3.zero
+				notify("ANTI VOID SAVE")
+			end
+		end
+
+		if Config.spin and not Config.flying then
+			rootPart.CFrame *= CFrame.Angles(0, math.rad(Config.spinSpeed * dt), 0)
+		end
+	end)
+
+	-- Zoom: hold the zoom key to narrow the field of view.
+	RunService.RenderStepped:Connect(function(dt)
+		local camera = workspace.CurrentCamera
+		if camera and Config.zoom then
+			local goal = isDown(Config.zoomKey) and Config.zoomFov or Config.fov
+			camera.FieldOfView += (goal - camera.FieldOfView) * math.min(1, dt * 12)
+		end
+	end)
+
+	-- Click teleport: hold the click-TP key and click the world.
+	UserInputService.InputBegan:Connect(function(input, processed)
+		if processed or introPlaying or not Config.clickTp then return end
+		if input.UserInputType ~= Enum.UserInputType.MouseButton1 or not isDown(Config.clickTpKey) then return end
+		local camera = workspace.CurrentCamera
+		local _, rootPart = getParts()
+		if not (camera and rootPart) then return end
+		local location = UserInputService:GetMouseLocation()
+		local ray = camera:ViewportPointToRay(location.X, location.Y)
+		local params = RaycastParams.new()
+		params.FilterType = Enum.RaycastFilterType.Exclude
+		params.FilterDescendantsInstances = { player.Character }
+		local result = workspace:Raycast(ray.Origin, ray.Direction * 5000, params)
+		if result then
+			rootPart.CFrame = CFrame.new(result.Position + Vector3.new(0, 3, 0)) * rootPart.CFrame.Rotation
+			rootPart.AssemblyLinearVelocity = Vector3.zero
+		end
+	end)
+
+	-- Actions used by buttons in the LIST and MISC tabs.
+	function Actions.teleportTo(other)
+		local _, rootPart = getParts()
+		local target = other.Character and other.Character:FindFirstChild("HumanoidRootPart")
+		if rootPart and target then
+			rootPart.CFrame = target.CFrame * CFrame.new(0, 2, 4)
+			rootPart.AssemblyLinearVelocity = Vector3.zero
+			notify("TELEPORTED TO " .. string.upper(other.DisplayName))
+		else
+			notify("TARGET UNAVAILABLE")
+		end
+	end
+
+	function Actions.stopView()
+		Actions.viewing = nil
+		local humanoid = getParts()
+		local camera = workspace.CurrentCamera
+		if camera and humanoid then camera.CameraSubject = humanoid end
+		renderAll()
+	end
+
+	function Actions.view(other)
+		if Actions.viewing == other then
+			Actions.stopView()
+			notify("SPECTATE OFF")
+			return
+		end
+		local humanoid = other.Character and other.Character:FindFirstChildOfClass("Humanoid")
+		local camera = workspace.CurrentCamera
+		if humanoid and camera then
+			Actions.viewing = other
+			camera.CameraSubject = humanoid
+			renderAll()
+			notify("VIEWING " .. string.upper(other.DisplayName))
+		else
+			notify("TARGET UNAVAILABLE")
+		end
+	end
+
+	function Actions.setWaypoint(index)
+		local _, rootPart = getParts()
+		if rootPart then
+			waypoints[index] = rootPart.CFrame
+			renderAll()
+			notify("WAYPOINT " .. index .. " SAVED")
+		end
+	end
+
+	function Actions.gotoWaypoint(index)
+		local _, rootPart = getParts()
+		if rootPart and waypoints[index] then
+			rootPart.CFrame = waypoints[index]
+			rootPart.AssemblyLinearVelocity = Vector3.zero
+			notify("TELEPORTED TO WAYPOINT " .. index)
+		else
+			notify("WAYPOINT " .. index .. " IS EMPTY")
+		end
+	end
+
+	function Actions.resetCharacter()
+		local humanoid = getParts()
+		if humanoid then humanoid.Health = 0 end
+	end
+
+	function Actions.rejoin()
+		notify("REJOINING")
+		pcall(function() TeleportService:Teleport(game.PlaceId, player) end)
+	end
+end
+
+do -- Overlays: HUD readout and crosshair
+	local overlay = create("ScreenGui", {
+		Name = "FlightOverlay", ResetOnSpawn = false, IgnoreGuiInset = true, DisplayOrder = 5,
+		ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+	}, playerGui)
+
+	local hud = bind(create("TextLabel", {
+		Position = UDim2.fromOffset(14, 14), Size = UDim2.fromOffset(420, 20), BackgroundTransparency = 1,
+		Font = Fonts.bold, TextSize = 14, TextXAlignment = Enum.TextXAlignment.Left, Visible = false, Text = "",
+	}, overlay), "TextColor3", "text")
+	bindGlow(bind(create("UIStroke", { Thickness = 1.5 }, hud), "Color", "accent"), "Transparency", 0.5)
+
+	local cross = create("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(0, 0),
+		BackgroundTransparency = 1, Visible = false,
+	}, overlay)
+	local arms = {}
+	for index = 1, 4 do
+		arms[index] = bind(create("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), BorderSizePixel = 0 }, cross), "BackgroundColor3", "accent")
+	end
+	local dot = bind(create("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0.5), Size = UDim2.fromOffset(3, 3), BorderSizePixel = 0,
+	}, cross), "BackgroundColor3", "text")
+	local shownSize
+
+	local function layoutCrosshair()
+		shownSize = Config.crosshairSize
+		local length, gap, thickness = shownSize, 4, 2
+		local offset = gap + length / 2
+		arms[1].Size, arms[1].Position = UDim2.fromOffset(length, thickness), UDim2.fromOffset(offset, 0)
+		arms[2].Size, arms[2].Position = UDim2.fromOffset(length, thickness), UDim2.fromOffset(-offset, 0)
+		arms[3].Size, arms[3].Position = UDim2.fromOffset(thickness, length), UDim2.fromOffset(0, -offset)
+		arms[4].Size, arms[4].Position = UDim2.fromOffset(thickness, length), UDim2.fromOffset(0, offset)
+	end
+
+	local fps, ping, pingClock = 60, 0, 0
+	RunService.RenderStepped:Connect(function(dt)
+		hud.Visible = Config.hud
+		if Config.hud then
+			fps += (1 / math.max(dt, 0.001) - fps) * 0.1
+			if os.clock() - pingClock > 0.5 then
+				pingClock = os.clock()
+				local ok, seconds = pcall(function() return player:GetNetworkPing() end)
+				if ok and typeof(seconds) == "number" then ping = seconds * 1000 end
+			end
+			local _, rootPart = getParts()
+			local speed = rootPart and rootPart.AssemblyLinearVelocity.Magnitude or 0
+			hud.Text = string.format("FPS %d   |   PING %dms   |   SPEED %d%s",
+				math.floor(fps + 0.5), math.floor(ping + 0.5), math.floor(speed), Config.flying and "   |   FLYING" or "")
+		end
+
+		cross.Visible = Config.crosshair and not introPlaying
+		if Config.crosshair and shownSize ~= Config.crosshairSize then layoutCrosshair() end
+	end)
+	layoutCrosshair()
+end
+
+--------------------------------------------------------------------------------
+-- Extras: more movement, camera, world and utility features
+--------------------------------------------------------------------------------
+
+do
+	-- Every Config key must exist before DEFAULT_CONFIG is captured, so they all live here.
+	local defaults = {
+		doubleJump = false, dash = false, fastFall = false, autoWalk = false,
+		respawnInPlace = false, lowHpWarn = false, joinAlerts = false, hotkeys = false,
+		dynamicFov = false, lockWindow = false, halo = true, sweep = true, footerHints = true, rainbowTheme = false,
+		edgeChase = true, aurora = true, breathe = true, cornerPulse = true, animSpeed = 1,
+		dashPower = 90, dashCooldown = 1.5, fallSpeed = 120, hipOffset = 0, camOffsetY = 0, fovKick = 20,
+		timeFlow = 0, gradeSat = 0, gradeContrast = 0, gradeBright = 0, blurSize = 0,
+		uiOpacity = 0, notifyTime = 2.2, rainbowSpeed = 0.08, fontFamily = 1,
+		maxZoom = math.clamp(player.CameraMaxZoomDistance, 5, 1000),
+		dashKey = Enum.KeyCode.E, noclipKey = Enum.KeyCode.N, fullbrightKey = Enum.KeyCode.B,
+		espKey = Enum.KeyCode.J, panicKey = Enum.KeyCode.Delete,
+		-- Advanced flight (v6)
+		flyPlanar = false, flyCruise = false, flyNoclip = false, flyWheel = false, flyLocked = true,
+		flyDecel = 0.15, flyTilt = 12,
+	}
+	for key, value in pairs(defaults) do Config[key] = value end
+
+	-- Ranges used by the config importer (imports of keys without a range are dropped).
+	for key, range in pairs({
+		dashPower = { 20, 250 }, dashCooldown = { 0.2, 5 }, fallSpeed = { 30, 400 }, hipOffset = { -2, 4 },
+		camOffsetY = { -4, 4 }, fovKick = { 0, 60 }, maxZoom = { 5, 1000 }, timeFlow = { 0, 12 },
+		gradeSat = { -1, 2 }, gradeContrast = { -0.5, 1 }, gradeBright = { -0.5, 0.5 }, blurSize = { 0, 40 },
+		uiOpacity = { 0, 0.7 }, notifyTime = { 0.5, 8 }, rainbowSpeed = { 0.02, 1 }, fontFamily = { 1, 5 },
+		animSpeed = { 0.2, 3 },
+		flyDecel = { 0.02, 1 }, flyTilt = { 0, 45 },
+	}) do LIMITS[key] = range end
+
+	-- Colour grade and blur live in Lighting, so NO EFFECTS also switches them off.
+	local grade = create("ColorCorrectionEffect", { Name = "FlightGrade" }, Lighting)
+	local blur = create("BlurEffect", { Name = "FlightBlur", Size = 0 }, Lighting)
+	Handlers.gradeSat = function(value) grade.Saturation = value end
+	Handlers.gradeContrast = function(value) grade.Contrast = value end
+	Handlers.gradeBright = function(value) grade.Brightness = value end
+	Handlers.blurSize = function(value) blur.Size = value end
+	Handlers.maxZoom = function(value) player.CameraMaxZoomDistance = value end
+	Handlers.dynamicFov = function(enabled)
+		local camera = workspace.CurrentCamera
+		if camera and not enabled and not Config.zoom then camera.FieldOfView = Config.fov end
+	end
+
+	local hipBase = setmetatable({}, { __mode = "k" })
+	local trail = {}
+	local camTouched, extraJumps = false, 0
+	local lastDash, lastWarn, lastGround, recallClock = 0, 0, 0, 0
+
+	RunService.Heartbeat:Connect(function(dt)
+		if Config.timeFlow > 0 and not Config.freezeTime then
+			Lighting.ClockTime = (Lighting.ClockTime + dt * Config.timeFlow / 60) % 24
+		end
+
+		local humanoid, rootPart = getParts()
+		if not (humanoid and rootPart) then return end
+		local airborne = humanoid.FloorMaterial == Enum.Material.Air
+		if not airborne then
+			extraJumps = 0
+			lastGround = os.clock()
+		end
+
+		if Config.hipOffset ~= 0 or hipBase[humanoid] then
+			hipBase[humanoid] = hipBase[humanoid] or humanoid.HipHeight
+			humanoid.HipHeight = hipBase[humanoid] + Config.hipOffset
+		end
+		if Config.camOffsetY ~= 0 or camTouched then
+			camTouched = Config.camOffsetY ~= 0
+			humanoid.CameraOffset = Vector3.new(0, Config.camOffsetY, 0)
+		end
+
+		if Config.fastFall and not Config.flying and airborne and isDown(Config.downKey) then
+			local current = rootPart.AssemblyLinearVelocity
+			if current.Y > -Config.fallSpeed then
+				rootPart.AssemblyLinearVelocity = Vector3.new(current.X, -Config.fallSpeed, current.Z)
+			end
+		end
+
+		if Config.autoWalk and not Config.flying and not UserInputService:GetFocusedTextBox()
+			and axis(Enum.KeyCode.W, Enum.KeyCode.S) == 0 and axis(Enum.KeyCode.D, Enum.KeyCode.A) == 0 then
+			humanoid:Move(Vector3.new(0, 0, -1), true)
+		end
+
+		if Config.lowHpWarn and humanoid.Health > 0 and humanoid.Health / math.max(humanoid.MaxHealth, 1) < 0.25
+			and os.clock() - lastWarn > 6 then
+			lastWarn = os.clock()
+			notify("LOW HEALTH")
+		end
+
+		-- Position history for RECALL (one sample every half second, ten samples).
+		recallClock += dt
+		if recallClock >= 0.5 then
+			recallClock = 0
+			if not Config.freeze then
+				table.insert(trail, rootPart.CFrame)
+				if #trail > 10 then table.remove(trail, 1) end
+			end
+		end
+	end)
+
+	-- Speed-based field of view (yields to ZOOM when both are on).
+	RunService.RenderStepped:Connect(function(dt)
+		if not Config.dynamicFov or Config.zoom then return end
+		local camera = workspace.CurrentCamera
+		local _, rootPart = getParts()
+		if not (camera and rootPart) then return end
+		local top = math.max(Config.flySpeed * Config.boost, 1)
+		local ratio = math.clamp(rootPart.AssemblyLinearVelocity.Magnitude / top, 0, 1)
+		local goal = Config.fov + Config.fovKick * ratio
+		camera.FieldOfView += (goal - camera.FieldOfView) * math.min(1, dt * 8)
+	end)
+
+	UserInputService.JumpRequest:Connect(function()
+		if not Config.doubleJump or Config.flying or extraJumps >= 1 or os.clock() - lastGround < 0.2 then return end
+		local humanoid = getParts()
+		if humanoid and humanoid.FloorMaterial == Enum.Material.Air then
+			extraJumps += 1
+			humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
+		end
+	end)
+
+	UserInputService.InputBegan:Connect(function(input, processed)
+		if processed or introPlaying or not Config.dash or Config.flying then return end
+		if input.KeyCode ~= Config.dashKey or os.clock() - lastDash < Config.dashCooldown then return end
+		local humanoid, rootPart = getParts()
+		local camera = workspace.CurrentCamera
+		if not (humanoid and rootPart and camera) then return end
+		local direction = humanoid.MoveDirection
+		if direction.Magnitude < 0.1 then
+			direction = Vector3.new(camera.CFrame.LookVector.X, 0, camera.CFrame.LookVector.Z)
+		end
+		if direction.Magnitude < 0.01 then return end
+		lastDash = os.clock()
+		local current = rootPart.AssemblyLinearVelocity
+		rootPart.AssemblyLinearVelocity = direction.Unit * Config.dashPower + Vector3.new(0, math.max(current.Y, 0), 0)
+	end)
+
+	-- RESPAWN HERE: come back where you died.
+	local deathCFrame
+	local function watchCharacter(character)
+		table.clear(trail)
+		local humanoid = character:WaitForChild("Humanoid", 5)
+		local rootPart = character:WaitForChild("HumanoidRootPart", 5)
+		if not (humanoid and rootPart) then return end
+		local saved = deathCFrame
+		deathCFrame = nil
+		if Config.respawnInPlace and saved then rootPart.CFrame = saved end
+		humanoid.Died:Connect(function() deathCFrame = rootPart.CFrame end)
+	end
+	player.CharacterAdded:Connect(watchCharacter)
+	if player.Character then task.spawn(watchCharacter, player.Character) end
+
+	Players.PlayerAdded:Connect(function(other)
+		if Config.joinAlerts then notify(string.upper(other.DisplayName) .. " JOINED") end
+	end)
+	Players.PlayerRemoving:Connect(function(other)
+		if Config.joinAlerts and other ~= player then notify(string.upper(other.DisplayName) .. " LEFT") end
+	end)
+
+	function Actions.recall()
+		local _, rootPart = getParts()
+		local target = trail[1]
+		if rootPart and target then
+			rootPart.CFrame = target
+			rootPart.AssemblyLinearVelocity = Vector3.zero
+			table.clear(trail)
+			notify("RECALLED")
+		else
+			notify("NOTHING TO RECALL")
+		end
+	end
+
+	function Actions.toSpawn()
+		local _, rootPart = getParts()
+		local spawn = player.RespawnLocation or workspace:FindFirstChildWhichIsA("SpawnLocation", true)
+		if rootPart and spawn then
+			rootPart.CFrame = spawn.CFrame + Vector3.new(0, 5, 0)
+			rootPart.AssemblyLinearVelocity = Vector3.zero
+			notify("TELEPORTED TO SPAWN")
+		else
+			notify("NO SPAWN FOUND")
+		end
+	end
+end
+
+--------------------------------------------------------------------------------
+-- Config snapshots (used by the CONFIG tab)
+--------------------------------------------------------------------------------
+
+-- Runtime state that is never saved into a config.
+local SKIP = { flying = true, freeze = true, whitelist = true }
+local STAT_BY_KEY = {}
+for _, stat in ipairs(STATS) do STAT_BY_KEY[stat.key] = stat end
+
+-- Copy of every saveable setting. With `onlyChanged`, only values that differ from the defaults.
+local DEFAULT_CONFIG = {}
+local function capture(onlyChanged)
+	local out = {}
+	for key, value in pairs(Config) do
+		local kind = typeof(value)
+		if not SKIP[key] and (kind == "number" or kind == "boolean" or kind == "string" or kind == "EnumItem") then
+			if not onlyChanged or DEFAULT_CONFIG[key] ~= value then out[key] = value end
+		end
+	end
+	return out
+end
+DEFAULT_CONFIG = capture(false)
+
+-- Turns untrusted data (an imported code) into values that are safe to apply.
+local function decodeConfig(raw)
+	local clean = {}
+	for key, value in pairs(raw) do
+		local current = Config[key]
+		if SKIP[key] or current == nil then
+			-- Unknown or runtime-only setting: ignored.
+		elseif typeof(current) == "boolean" then
+			if typeof(value) == "boolean" then clean[key] = value end
+		elseif typeof(current) == "number" then
+			if typeof(value) == "number" then
+				local limit, stat = LIMITS[key], STAT_BY_KEY[key]
+				if limit then
+					clean[key] = math.clamp(value, limit[1], limit[2])
+				elseif stat then
+					clean[key] = math.clamp(value, stat.min, stat.max)
+				end
+			end
+		elseif typeof(current) == "EnumItem" then
+			if typeof(value) == "string" and string.sub(value, 1, 4) == "key:" then
+				local ok, keyCode = pcall(function() return Enum.KeyCode[string.sub(value, 5)] end)
+				if ok and keyCode then clean[key] = keyCode end
+			end
+		elseif key == "aimPart" then
+			if value == "Head" or value == "HumanoidRootPart" then clean[key] = value end
+		end
+	end
+	return clean
+end
+
+local function exportConfig()
+	local data = {}
+	for key, value in pairs(capture(true)) do
+		data[key] = typeof(value) == "EnumItem" and ("key:" .. value.Name) or value
+	end
+	return HttpService:JSONEncode(data)
+end
+
+--------------------------------------------------------------------------------
+-- Window
+--------------------------------------------------------------------------------
+
+local WIN_W, WIN_H = 760, 520
+local HEADER_H, FOOT_H, SIDE_W = 46, 28, 150
+local CONTENT_X, CONTENT_Y = SIDE_W + 12, HEADER_H + 10
+local CONTENT_W, CONTENT_H = WIN_W - CONTENT_X - 12, WIN_H - CONTENT_Y - FOOT_H - 8
+
+local gui = create("ScreenGui", {
+	Name = "FlightStatus", ResetOnSpawn = false, ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+}, playerGui)
+
+-- System notification toast ("[ SYSTEM ] FLIGHT ACTIVATED").
+do
+	local frame = bind(create("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 0, 0, -80), Size = UDim2.fromOffset(340, 54),
+		BackgroundTransparency = 0.1, BorderSizePixel = 0, ZIndex = 50,
+	}, gui), "BackgroundColor3", "panel")
+	outline(frame, 0.2)
+	addBrackets(frame, 10, 2, "trim", -3)
+	label(frame, {
+		Text = "[ SYSTEM ]", TextSize = 10, Font = Fonts.bold, Role = "trim", ZIndex = 51,
+		Position = UDim2.fromOffset(16, 7), Size = UDim2.fromOffset(200, 12),
+	})
+	local message = label(frame, {
+		TextSize = 16, Font = Fonts.black, Glow = true, ZIndex = 51,
+		Position = UDim2.fromOffset(16, 22), Size = UDim2.fromOffset(308, 24),
+	})
+	local token = 0
+	notify = function(text)
+		if not Config.notifications then return end
+		token += 1
+		local id = token
+		message.Text = text
+		TweenService:Create(frame, TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+			{ Position = UDim2.new(0.5, 0, 0, 18) }):Play()
+		task.delay(Config.notifyTime, function()
+			if token == id then
+				TweenService:Create(frame, TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.In),
+					{ Position = UDim2.new(0.5, 0, 0, -80) }):Play()
+			end
+		end)
+	end
+end
+
+local root = create("Frame", {
+	Size = UDim2.fromOffset(WIN_W, WIN_H), AnchorPoint = Vector2.new(0.5, 0.5),
+	Position = UDim2.fromScale(0.5, 0.5), BackgroundTransparency = 1,
+}, gui)
+local viewport = workspace.CurrentCamera.ViewportSize
+local baseScale = math.min(1, viewport.Y / (WIN_H + 60), viewport.X / 820)
+local rootScale = create("UIScale", { Scale = baseScale * Config.uiScale }, root)
+local function targetScale() return baseScale * Config.uiScale end
+Handlers.uiScale = function() rootScale.Scale = targetScale() end
+
+-- Soft halo behind the window. The layers are kept in `Living` so BREATHE can pulse them.
+local halo = create("Frame", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1 }, root)
+local Living = { halo = {} }
+for index = 1, 8 do
+	local layer = create("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5),
+		Size = UDim2.new(1, index * 7, 1, index * 7), BorderSizePixel = 0,
+	}, halo)
+	bindGlow(bind(layer, "BackgroundColor3", "accent"), "BackgroundTransparency", 0.94)
+	Living.halo[index] = layer
+end
+
+local main = create("Frame", {
+	Size = UDim2.fromScale(1, 1), BackgroundColor3 = Color3.new(1, 1, 1), BorderSizePixel = 0, ClipsDescendants = true,
+}, root)
+outline(main, 0.15)
+bind(create("UIGradient", { Rotation = 90 }, main), "Color", function(colors)
+	return ColorSequence.new(colors.backTop, colors.backBottom)
+end)
+addBrackets(root, 22, 3, "accent", -6)
+
+-- Faint horizontal scan grid.
+for index = 1, math.floor(WIN_H / 32) do
+	bind(create("Frame", {
+		Position = UDim2.fromOffset(0, index * 32), Size = UDim2.new(1, 0, 0, 1),
+		BackgroundTransparency = 0.95, BorderSizePixel = 0,
+	}, main), "BackgroundColor3", "line")
+end
+
+-- Aurora bands and a slow scan band (behind everything else).
+do
+	local group = create("CanvasGroup", {
+		Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, GroupTransparency = 0.3,
+	}, main)
+	local bands = {}
+	for index = 1, 3 do
+		local frame = create("Frame", {
+			AnchorPoint = Vector2.new(0.5, 0.5), Size = UDim2.fromOffset(WIN_W * 1.5, 60 + index * 20),
+			Rotation = -22 + index * 9, BackgroundColor3 = Color3.new(1, 1, 1), BorderSizePixel = 0,
+		}, group)
+		bind(frame, "BackgroundColor3", index == 2 and "line" or "accent")
+		create("UIGradient", {
+			Rotation = 90,
+			Transparency = NumberSequence.new({
+				NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(0.5, 0.86), NumberSequenceKeypoint.new(1, 1),
+			}),
+		}, frame)
+		bands[index] = { frame = frame, phase = index * 2.1, speed = 0.12 + index * 0.05, baseY = WIN_H * 0.25 * index }
+	end
+	local scan = bind(create("Frame", {
+		Size = UDim2.fromOffset(WIN_W, 56), BackgroundColor3 = Color3.new(1, 1, 1), BorderSizePixel = 0,
+	}, group), "BackgroundColor3", "line")
+	create("UIGradient", {
+		Rotation = 90,
+		Transparency = NumberSequence.new({
+			NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(0.5, 0.8), NumberSequenceKeypoint.new(1, 1),
+		}),
+	}, scan)
+	Living.aurora, Living.bands, Living.scan = group, bands, scan
+end
+
+-- Drifting particles and shooting stars (behind all content).
+local particleLayer = create("Frame", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, ClipsDescendants = true }, main)
+local particles = {}
+for index = 1, 45 do
+	local streak = index % 6 == 0
+	local dot = random:NextInteger(2, 4)
+	local frame = create("Frame", {
+		Size = streak and UDim2.fromOffset(1, random:NextInteger(8, 18)) or UDim2.fromOffset(dot, dot), BorderSizePixel = 0,
+	}, particleLayer)
+	bind(frame, "BackgroundColor3", index % 3 == 0 and "text" or "accent")
+	particles[index] = {
+		frame = frame, x = random:NextNumber() * WIN_W, y = random:NextNumber() * WIN_H,
+		speed = random:NextNumber(10, 36), drift = random:NextNumber(4, 16),
+		freq = random:NextNumber(0.4, 1.4), phase = random:NextNumber() * math.pi * 2, alpha = random:NextNumber(0.3, 0.8),
+	}
+end
+
+-- Drifting runes: large faint outlines that turn slowly as they rise.
+Living.runes = {}
+for index = 1, 6 do
+	local size = random:NextInteger(26, 60)
+	local frame = create("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0.5), Size = UDim2.fromOffset(size, size), BackgroundTransparency = 1, BorderSizePixel = 0,
+	}, particleLayer)
+	local stroke = bind(create("UIStroke", { Thickness = 1.5, Transparency = 1 }, frame), "Color", index % 2 == 0 and "line" or "accent")
+	Living.runes[index] = {
+		frame = frame, stroke = stroke, x = random:NextNumber() * WIN_W, y = random:NextNumber() * WIN_H,
+		speed = random:NextNumber(6, 16), spin = random:NextNumber(-40, 40), phase = random:NextNumber() * math.pi * 2,
+	}
+end
+
+local function updateParticles(dt, elapsed)
+	particleLayer.Visible = Config.particles
+	if not Config.particles then return end
+	for _, p in ipairs(particles) do
+		p.y -= p.speed * Config.flow * dt
+		p.x += math.sin(elapsed * p.freq + p.phase) * p.drift * dt
+		if p.y < -20 then p.x, p.y = random:NextNumber() * WIN_W, WIN_H + 20 end
+		local fade = math.clamp(math.min(p.y, WIN_H - p.y) / 60, 0, 1)
+		local twinkle = 0.75 + 0.25 * math.sin(elapsed * p.freq * 3 + p.phase)
+		p.frame.Position = UDim2.fromOffset(p.x, p.y)
+		p.frame.BackgroundTransparency = 1 - p.alpha * fade * twinkle
+	end
+	for _, rune in ipairs(Living.runes) do
+		rune.y -= rune.speed * Config.flow * dt
+		if rune.y < -80 then rune.x, rune.y = random:NextNumber() * WIN_W, WIN_H + 80 end
+		rune.frame.Position = UDim2.fromOffset(rune.x + math.sin(elapsed * 0.5 + rune.phase) * 20, rune.y)
+		rune.frame.Rotation = elapsed * rune.spin + rune.phase * 57
+		local fade = math.clamp(math.min(rune.y, WIN_H - rune.y) / 120, 0, 1)
+		rune.stroke.Transparency = 1 - 0.4 * fade * Config.glow
+	end
+end
+
+local meteorLayer = create("Frame", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, ClipsDescendants = true }, main)
+local meteorField = makeMeteorField(meteorLayer, WIN_W, WIN_H, 3, {
+	length = { 110, 190 }, speed = { 240, 380 }, life = { 1.1, 2 }, interval = { 2.5, 6 },
+})
+
+-- Edge light, corner pulses and the per-frame update for all the animation above.
+local updateLiving
+do
+	local EDGE_LEN = 220
+	local PERIMETER = 2 * (WIN_W + WIN_H)
+	local EDGES = {
+		{ start = 0, length = WIN_W },                 -- top, left to right
+		{ start = WIN_W, length = WIN_H },             -- right, top to bottom
+		{ start = WIN_W + WIN_H, length = WIN_W },     -- bottom, right to left
+		{ start = 2 * WIN_W + WIN_H, length = WIN_H }, -- left, bottom to top
+	}
+	local edgeLayers = {}
+	for comet = 1, 2 do
+		edgeLayers[comet] = {}
+		for edgeIndex = 1, 4 do
+			local layers = {}
+			for layerIndex, spec in ipairs({ { 6, "accent", 0.5 }, { 2, "text", 1 } }) do
+				local frame = create("Frame", { BorderSizePixel = 0, Visible = false, ZIndex = 20 }, main)
+				bind(frame, "BackgroundColor3", spec[2])
+				local gradient = create("UIGradient", { Rotation = ({ 0, 90, 180, 270 })[edgeIndex] }, frame)
+				layers[layerIndex] = { frame = frame, gradient = gradient, thickness = spec[1], strength = spec[3] }
+			end
+			edgeLayers[comet][edgeIndex] = layers
+		end
+	end
+
+	local function placeEdge(edgeIndex, frame, thickness, a, b)
+		local start, length = EDGES[edgeIndex].start, b - a
+		if edgeIndex == 1 then
+			frame.Position, frame.Size = UDim2.fromOffset(a - start, 0), UDim2.fromOffset(length, thickness)
+		elseif edgeIndex == 2 then
+			frame.Position, frame.Size = UDim2.fromOffset(WIN_W - thickness, a - start), UDim2.fromOffset(thickness, length)
+		elseif edgeIndex == 3 then
+			frame.Position, frame.Size = UDim2.fromOffset(WIN_W - (b - start), WIN_H - thickness), UDim2.fromOffset(length, thickness)
+		else
+			frame.Position, frame.Size = UDim2.fromOffset(0, WIN_H - (b - start)), UDim2.fromOffset(thickness, length)
+		end
+	end
+
+	local function updateEdges(t)
+		local head0 = (t * 260) % PERIMETER
+		for comet = 1, 2 do
+			local head = (head0 + (comet - 1) * PERIMETER / 2) % PERIMETER
+			for edgeIndex, edge in ipairs(EDGES) do
+				local layers = edgeLayers[comet][edgeIndex]
+				local shown = false
+				if Config.edgeChase then
+					for _, shift in ipairs({ 0, PERIMETER }) do -- the second pass catches a tail that wrapped past the start
+						local h = head + shift
+						local a = math.max(h - EDGE_LEN, edge.start)
+						local b = math.min(h, edge.start + edge.length)
+						if b - a > 0.5 then
+							local brightA = ((a - (h - EDGE_LEN)) / EDGE_LEN) ^ 2
+							local brightB = ((b - (h - EDGE_LEN)) / EDGE_LEN) ^ 2
+							for _, layer in ipairs(layers) do
+								placeEdge(edgeIndex, layer.frame, layer.thickness, a, b)
+								local k = Config.glow * layer.strength
+								layer.gradient.Transparency = NumberSequence.new(1 - brightA * k, 1 - brightB * k)
+								layer.frame.Visible = true
+							end
+							shown = true
+							break
+						end
+					end
+				end
+				if not shown then
+					for _, layer in ipairs(layers) do layer.frame.Visible = false end
+				end
+			end
+		end
+	end
+
+	-- Pulsing diamonds on the four outer corners of the window.
+	local corners = {}
+	for index, corner in ipairs({ { 0, 0 }, { 1, 0 }, { 0, 1 }, { 1, 1 } }) do
+		local diamond = create("Frame", {
+			AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(corner[1], corner[2]), Rotation = 45,
+			Size = UDim2.fromOffset(8, 8), BorderSizePixel = 0,
+		}, root)
+		bind(diamond, "BackgroundColor3", "trim")
+		corners[index] = diamond
+	end
+
+	-- Called every frame from the live readout loop with the menu's elapsed time.
+	updateLiving = function(elapsed)
+		local t = elapsed * Config.animSpeed
+
+		updateEdges(t)
+
+		Living.aurora.Visible = Config.aurora
+		if Config.aurora then
+			Living.aurora.GroupTransparency = 1 - 0.85 * Config.glow
+			for _, band in ipairs(Living.bands) do
+				band.frame.Position = UDim2.fromOffset(
+					WIN_W / 2 + math.sin(t * band.speed + band.phase) * 110,
+					band.baseY + math.sin(t * band.speed * 1.7 + band.phase) * 50
+				)
+			end
+			Living.scan.Position = UDim2.fromOffset(0, ((t * 0.12) % 1) * (WIN_H + 112) - 56)
+		end
+
+		local breath = Config.breathe and (1 + 0.45 * math.sin(t * 1.3)) or 1
+		for index, layer in ipairs(Living.halo) do
+			layer.Size = UDim2.new(1, index * 7 * breath, 1, index * 7 * breath)
+		end
+
+		for index, diamond in ipairs(corners) do
+			diamond.Visible = Config.cornerPulse
+			if Config.cornerPulse then
+				local pulse = 0.5 + 0.5 * math.sin(t * 2.4 + index * 1.57)
+				local side = 6 + 6 * pulse
+				diamond.Size = UDim2.fromOffset(side, side)
+				diamond.BackgroundTransparency = 1 - (0.35 + 0.65 * pulse) * Config.glow
+			end
+		end
+	end
+end
+
+-- Header ---------------------------------------------------------------------
+
+local header = bind(create("Frame", {
+	Size = UDim2.new(1, 0, 0, HEADER_H), BackgroundTransparency = 0.3, BorderSizePixel = 0, ClipsDescendants = true,
+}, main), "BackgroundColor3", "panel")
+bindGlow(bind(create("Frame", {
+	Position = UDim2.new(0, 0, 1, -2), Size = UDim2.new(1, 0, 0, 2), BorderSizePixel = 0,
+}, header), "BackgroundColor3", "accent"), "BackgroundTransparency", 0.1)
+local sweepBar = bind(create("Frame", {
+	Position = UDim2.new(0, -150, 1, -2), Size = UDim2.fromOffset(150, 2), BorderSizePixel = 0,
+}, header), "BackgroundColor3", "text")
+create("UIGradient", {
+	Transparency = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(0.5, 0), NumberSequenceKeypoint.new(1, 1),
+	}),
+}, sweepBar)
+
+label(header, {
+	Text = "[ SYSTEM ]", TextSize = 10, Font = Fonts.bold, Role = "trim",
+	Position = UDim2.fromOffset(18, 6), Size = UDim2.fromOffset(120, 12),
+})
+local heading = label(header, {
+	TextSize = 19, Font = Fonts.black, Glow = true,
+	Position = UDim2.fromOffset(18, 18), Size = UDim2.fromOffset(400, 24),
+})
+
+local badge = bind(create("Frame", {
+	Position = UDim2.fromOffset(WIN_W - 158, 12), Size = UDim2.fromOffset(100, 22),
+	BackgroundTransparency = 0.5, BorderSizePixel = 0,
+}, header), "BackgroundColor3", "panel")
+outline(badge, 0.3)
+label(badge, {
+	Text = role.label, TextSize = 11, Font = Fonts.bold, Role = session.role == "owner" and "trim" or "line",
+	Glow = true, TextXAlignment = Enum.TextXAlignment.Center,
+})
+local closeButton = bind(create("TextButton", {
+	Position = UDim2.fromOffset(WIN_W - 44, 10), Size = UDim2.fromOffset(28, 26), BackgroundTransparency = 1,
+	Text = "X", Font = Fonts.bold, TextSize = 14,
+}, header), "TextColor3", "muted")
+makeDraggable(header, root)
+
+-- Footer ---------------------------------------------------------------------
+
+local footer = bind(create("Frame", {
+	Position = UDim2.fromOffset(0, WIN_H - FOOT_H), Size = UDim2.new(1, 0, 0, FOOT_H),
+	BackgroundTransparency = 0.35, BorderSizePixel = 0,
+}, main), "BackgroundColor3", "panel")
+bind(create("Frame", { Size = UDim2.new(1, 0, 0, 1), BackgroundTransparency = 0.6, BorderSizePixel = 0 }, footer),
+	"BackgroundColor3", "line")
+local hintLabel = label(footer, {
+	TextSize = 11, Role = "muted", TextXAlignment = Enum.TextXAlignment.Center, Size = UDim2.new(1, 0, 1, 0),
+})
+makeDraggable(footer, root)
+
+-- Sidebar and tabs -----------------------------------------------------------
+
+local sidebar = bind(create("Frame", {
+	Position = UDim2.fromOffset(0, HEADER_H), Size = UDim2.fromOffset(SIDE_W, WIN_H - HEADER_H - FOOT_H),
+	BackgroundTransparency = 0.5, BorderSizePixel = 0,
+}, main), "BackgroundColor3", "panel")
+bind(create("Frame", {
+	AnchorPoint = Vector2.new(1, 0), Position = UDim2.fromScale(1, 0), Size = UDim2.new(0, 1, 1, 0),
+	BackgroundTransparency = 0.6, BorderSizePixel = 0,
+}, sidebar), "BackgroundColor3", "line")
+
+local SIDE_HEIGHT = WIN_H - HEADER_H - FOOT_H
+addBloom(sidebar, UDim2.fromOffset(SIDE_W / 2, SIDE_HEIGHT - 44), 70, 5, 0.92)
+table.insert(sigils, makeSigil(sidebar, 52, UDim2.fromOffset(SIDE_W / 2, SIDE_HEIGHT - 44)))
+label(sidebar, {
+	Text = "AWAKENED", TextSize = 9, Role = "muted", TextXAlignment = Enum.TextXAlignment.Center,
+	Position = UDim2.fromOffset(0, SIDE_HEIGHT - 22), Size = UDim2.new(1, -1, 0, 14),
+})
+
+local pages, tabNames, currentTab = {}, {}, nil
+local headings = {}
+
+local function showTab(name)
+	currentTab = name
+	for pageName, page in pairs(pages) do page.Visible = pageName == name end
+	heading.Text = headings[name]
+	for _, tabName in ipairs(tabNames) do
+		if renderers["tab" .. tabName] then renderers["tab" .. tabName]() end
+	end
+end
+
+local function addTab(index, name, title)
+	local button = create("TextButton", {
+		Text = "", AutoButtonColor = false, BorderSizePixel = 0,
+		Position = UDim2.fromOffset(10, 8 + (index - 1) * 30), Size = UDim2.fromOffset(SIDE_W - 20, 27),
+	}, sidebar)
+	local bar = create("Frame", { Size = UDim2.new(0, 3, 1, 0), BorderSizePixel = 0 }, button)
+	local text = label(button, {
+		Text = string.format("%02d   %s", index, name), TextSize = 12, Font = Fonts.bold,
+		Position = UDim2.fromOffset(14, 0), Size = UDim2.new(1, -14, 1, 0),
+	})
+	-- Pages scroll when their cards are taller than the window; fitPage sets the canvas once a tab is built.
+	local page = create("ScrollingFrame", {
+		Position = UDim2.fromOffset(CONTENT_X, CONTENT_Y), Size = UDim2.fromOffset(CONTENT_W + 8, CONTENT_H),
+		BackgroundTransparency = 1, BorderSizePixel = 0, Visible = false,
+		ScrollBarThickness = 4, CanvasSize = UDim2.new(), ScrollingDirection = Enum.ScrollingDirection.Y,
+	}, main)
+	bind(page, "ScrollBarImageColor3", "accent")
+
+	local function render()
+		local active = currentTab == name
+		button.BackgroundColor3 = Colors.accent
+		button.BackgroundTransparency = active and 0.72 or 1
+		bar.BackgroundColor3 = Colors.accent
+		bar.BackgroundTransparency = active and 0 or 1
+		text.TextColor3 = active and Colors.text or Colors.muted
+	end
+	button.Activated:Connect(function() showTab(name) end)
+	button.MouseEnter:Connect(function()
+		if currentTab ~= name then button.BackgroundTransparency = 0.88 end
+	end)
+	button.MouseLeave:Connect(render)
+
+	renderers["tab" .. name] = render
+	pages[name], headings[name] = page, title
+	table.insert(tabNames, name)
+	render()
+	return page
+end
+
+local function fitPage(page)
+	local bottom = 0
+	for _, child in ipairs(page:GetChildren()) do
+		if child:IsA("GuiObject") then
+			bottom = math.max(bottom, child.Position.Y.Offset + child.Size.Y.Offset)
+		end
+	end
+	page.CanvasSize = bottom <= CONTENT_H and UDim2.new() or UDim2.fromOffset(0, bottom + 6)
+end
+
+-- Widgets that depend on flight code ------------------------------------------
+
+local function addStepper(parent, stat, x, y)
+	local row = create("Frame", { Position = UDim2.fromOffset(x, y), Size = UDim2.fromOffset(270, 34), BackgroundTransparency = 1 }, parent)
+	label(row, { Text = stat.label, TextSize = 11, Role = "muted", Size = UDim2.fromOffset(100, 32) })
+	local value = label(row, {
+		TextSize = 22, Font = Fonts.bold, Glow = true, TextXAlignment = Enum.TextXAlignment.Center,
+		Position = UDim2.fromOffset(100, 0), Size = UDim2.fromOffset(70, 32),
+	})
+	local track = bind(create("Frame", {
+		Position = UDim2.fromOffset(0, 32), Size = UDim2.fromOffset(270, 2), BackgroundTransparency = 0.5, BorderSizePixel = 0,
+	}, row), "BackgroundColor3", "panel")
+	local fill = bind(create("Frame", { Size = UDim2.fromScale(0, 1), BorderSizePixel = 0 }, track), "BackgroundColor3", "accent")
+
+	local function set(amount)
+		Config[stat.key] = math.clamp(amount, stat.min, stat.max)
+		value.Text = tostring(Config[stat.key])
+		fill.Size = UDim2.fromScale((Config[stat.key] - stat.min) / (stat.max - stat.min), 1)
+		applyStat(stat.key)
+	end
+	for index, delta in ipairs({ -stat.step, stat.step }) do
+		local button = addButton(row, {
+			Text = delta < 0 and "-" or "+", TextSize = 18,
+			Position = UDim2.fromOffset(184 + (index - 1) * 38, 3), Size = UDim2.fromOffset(32, 26),
+		})
+		onHold(button, function() set(Config[stat.key] + delta) end)
+	end
+	steppers[stat.key] = set
+	set(Config[stat.key])
+end
+
+local ui = {} -- Labels updated every frame.
+
+-- Slider that writes a Config key and runs its handler (so the config loader and the slider share one path).
+local function setValue(key, value)
+	Config[key] = value
+	if Handlers[key] then Handlers[key](value) end
+end
+
+-- Applies a config table (defaults first, then `data`) to the script and refreshes every widget.
+local function applyConfig(data)
+	local merged = {}
+	for key, value in pairs(DEFAULT_CONFIG) do merged[key] = value end
+	for key, value in pairs(data) do merged[key] = value end
+
+	-- Only touch settings that actually change (skips the slow font, particle and theme repaints),
+	-- and isolate each handler so one failure cannot abort the whole load.
+	for key, value in pairs(merged) do
+		if steppers[key] then
+			steppers[key](value)
+		elseif Config[key] ~= value then
+			if key == "hue" then
+				setHue(value)
+			else
+				Config[key] = value
+				if Handlers[key] then
+					local ok, problem = pcall(Handlers[key], value)
+					if not ok then warn("[FlightMenu] config handler '" .. key .. "' failed: " .. tostring(problem)) end
+				end
+			end
+		end
+	end
+	-- Handlers can touch other settings (LITE MODE changes particles and stars); restore the saved values.
+	for key, value in pairs(merged) do
+		if not steppers[key] then Config[key] = value end
+	end
+
+	applyGlow()
+	for _, refresh in ipairs(refreshers) do refresh() end
+	renderAll()
+end
+
+-- Tab 1: STATUS ----------------------------------------------------------------
+do
+	local page = addTab(1, "STATUS", "STATUS WINDOW")
+
+	local function addRow(parent, caption, y, valueWidth)
+		label(parent, { Text = caption, TextSize = 11, Role = "muted", Position = UDim2.fromOffset(14, y + 3), Size = UDim2.fromOffset(60, 16) })
+		return label(parent, {
+			TextSize = 14, Font = Fonts.bold, TextTruncate = Enum.TextTruncate.AtEnd,
+			Position = UDim2.fromOffset(76, y), Size = UDim2.fromOffset(valueWidth, 22),
+		})
+	end
+
+	local info = addCard(page, "PLAYER", 0, 0, 288, 150)
+
+	do -- Rank crest: rotating seal, orbiting glyphs, tier colours
+		local CX, CY = 236, 80
+		local TIER = {
+			E = { title = "NOVICE",    glyphs = 2, power = 0.55 },
+			D = { title = "ADEPT",     glyphs = 3, power = 0.65 },
+			C = { title = "VETERAN",   glyphs = 4, power = 0.75 },
+			B = { title = "ELITE",     glyphs = 5, power = 0.90 },
+			A = { title = "MASTER",    glyphs = 6, power = 1.00 },
+			S = { title = "SOVEREIGN", glyphs = 8, power = 1.15 },
+		}
+
+		-- main, light, deep. E, D and C follow the theme; B, A and S have their own colours.
+		local function tierColors(rank)
+			if rank == "B" then
+				return Color3.fromHSV(0.40, 0.70, 1), Color3.fromHSV(0.40, 0.18, 1), Color3.fromHSV(0.40, 0.90, 0.14)
+			elseif rank == "A" then
+				return Color3.fromHSV(0.80, 0.70, 1), Color3.fromHSV(0.80, 0.18, 1), Color3.fromHSV(0.80, 0.90, 0.14)
+			elseif rank == "S" then
+				return GOLD, Color3.fromRGB(255, 244, 214), Color3.fromHSV(0.11, 0.85, 0.16)
+			elseif rank == "D" then
+				return Colors.line, Colors.text, Colors.panel
+			elseif rank == "C" then
+				return Colors.accent, Colors.text, Colors.panel
+			end
+			return Colors.muted, Colors.text, Colors.panel
+		end
+
+		local holder = create("Frame", {
+			AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromOffset(CX, CY),
+			Size = UDim2.fromOffset(90, 90), BackgroundTransparency = 1,
+		}, info)
+		local function centered(class, properties, parent)
+			properties.AnchorPoint = Vector2.new(0.5, 0.5)
+			properties.Position = properties.Position or UDim2.fromScale(0.5, 0.5)
+			return create(class, properties, parent)
+		end
+
+		-- Everything that takes the tier colour is registered here and repainted when the rank, theme or glow changes.
+		local parts, blooms, squares, glyphs = {}, {}, {}, {}
+		local function track(object, colorProperty, tone, transProperty, base)
+			table.insert(parts, { object = object, color = colorProperty, tone = tone, trans = transProperty, base = base })
+			return object
+		end
+
+		-- Soft halo (diamond layers, pulsed every frame).
+		for index = 1, 6 do
+			local side = 96 * index / 6 / 1.4142
+			local layer = centered("Frame", { Rotation = 45, Size = UDim2.fromOffset(side, side), BorderSizePixel = 0 }, holder)
+			track(layer, "BackgroundColor3", "main")
+			blooms[index] = layer
+		end
+
+		-- Seal: two counter-rotating squares make an eight-point star. The third square appears at S rank.
+		for index = 1, 3 do
+			local frame = centered("Frame", { Size = UDim2.fromOffset(44, 44), BackgroundTransparency = 1 }, holder)
+			track(create("UIStroke", { Thickness = index == 2 and 1.5 or 2 }, frame),
+				"Color", index == 2 and "light" or "main", "Transparency", index == 2 and 0.3 or 0.1)
+			squares[index] = frame
+		end
+
+		-- Rune ring: twelve tick marks that turn slowly the other way.
+		local ticks = centered("Frame", { Size = UDim2.fromOffset(80, 80), BackgroundTransparency = 1 }, holder)
+		for index = 0, 11 do
+			local angle = math.rad(index * 30)
+			local long = index % 3 == 0
+			local tick = create("Frame", {
+				AnchorPoint = Vector2.new(0.5, 0.5),
+				Position = UDim2.fromOffset(40 + math.sin(angle) * 35, 40 - math.cos(angle) * 35),
+				Size = UDim2.fromOffset(2, long and 6 or 3), Rotation = index * 30, BorderSizePixel = 0,
+			}, ticks)
+			track(tick, "BackgroundColor3", long and "light" or "main", "BackgroundTransparency", long and 0.15 or 0.4)
+		end
+
+		-- Orbiting glyphs: hollow diamonds with a dot, alternating with small four-point flares.
+		local orbit = centered("Frame", { Size = UDim2.fromOffset(90, 90), BackgroundTransparency = 1 }, holder)
+		for index = 1, 8 do
+			local glyph = create("Frame", {
+				AnchorPoint = Vector2.new(0.5, 0.5), Size = UDim2.fromOffset(9, 9), BackgroundTransparency = 1,
+			}, orbit)
+			if index % 2 == 1 then
+				local gem = centered("Frame", { Rotation = 45, Size = UDim2.fromOffset(6, 6), BackgroundTransparency = 1 }, glyph)
+				track(create("UIStroke", { Thickness = 1.5 }, gem), "Color", "main", "Transparency", 0.05)
+				track(centered("Frame", { Size = UDim2.fromOffset(2, 2), BorderSizePixel = 0 }, glyph),
+					"BackgroundColor3", "light", "BackgroundTransparency", 0)
+			else
+				track(centered("Frame", { Rotation = 45, Size = UDim2.fromOffset(4, 4), BorderSizePixel = 0 }, glyph),
+					"BackgroundColor3", "light", "BackgroundTransparency", 0)
+				for _, vertical in ipairs({ false, true }) do
+					track(centered("Frame", {
+						Size = vertical and UDim2.fromOffset(1, 9) or UDim2.fromOffset(9, 1), BorderSizePixel = 0,
+					}, glyph), "BackgroundColor3", "main", "BackgroundTransparency", 0.2)
+				end
+			end
+			glyphs[index] = glyph
+		end
+
+		-- Core: a dark diamond that holds the rank letter.
+		local core = centered("Frame", { Rotation = 45, Size = UDim2.fromOffset(32, 32), BackgroundTransparency = 0.25, BorderSizePixel = 0 }, holder)
+		track(core, "BackgroundColor3", "deep")
+		track(create("UIStroke", { Thickness = 1.5 }, core), "Color", "main", "Transparency", 0.1)
+
+		local letter = centered("TextLabel", {
+			Size = UDim2.fromOffset(40, 40), BackgroundTransparency = 1, Font = Fonts.black, TextSize = 28,
+			Text = "E", TextXAlignment = Enum.TextXAlignment.Center, TextYAlignment = Enum.TextYAlignment.Center,
+		}, holder)
+		track(create("UIStroke", { Thickness = 1.5 }, letter), "Color", "main", "Transparency", 0.5)
+		track(letter, "TextColor3", "light")
+		addBrackets(holder, 8, 2, "trim", 0)
+		ui.rank = letter -- the live loop keeps writing the rank letter here
+
+		local title = label(info, {
+			TextSize = 9, Font = Fonts.bold, TextXAlignment = Enum.TextXAlignment.Center,
+			Position = UDim2.fromOffset(186, 126), Size = UDim2.fromOffset(100, 14),
+		})
+		track(title, "TextColor3", "main")
+
+		local shownRank, shownColors, shownGlow
+		local function repaint(rank)
+			local tier = TIER[rank] or TIER.E
+			local main, light, deep = tierColors(rank)
+			local k = Config.glow * tier.power
+			for _, part in ipairs(parts) do
+				part.object[part.color] = part.tone == "main" and main or part.tone == "light" and light or deep
+				if part.trans then
+					part.object[part.trans] = math.clamp(1 - (1 - part.base) * k, 0, 1)
+				end
+			end
+			for index, glyph in ipairs(glyphs) do
+				glyph.Visible = index <= tier.glyphs
+				local angle = (index - 1) / tier.glyphs * math.pi * 2
+				glyph.Position = UDim2.fromOffset(45 + math.sin(angle) * 41, 45 - math.cos(angle) * 41)
+			end
+			squares[3].Visible = rank == "S"
+			title.Text = "[ " .. tier.title .. " ]"
+		end
+
+		ui.crest = {
+			update = function(t, rank)
+				if rank ~= shownRank or Colors ~= shownColors or Config.glow ~= shownGlow then
+					shownRank, shownColors, shownGlow = rank, Colors, Config.glow
+					repaint(rank)
+				end
+				local tier = TIER[rank] or TIER.E
+				local speed = rank == "S" and 1.5 or 1
+				squares[1].Rotation = t * 14 * speed
+				squares[2].Rotation = 45 - t * 14 * speed
+				squares[3].Rotation = 22.5 + t * 7 * speed
+				ticks.Rotation = -t * 9
+				orbit.Rotation = t * 24 * speed
+				local pulse = 0.8 + 0.2 * math.sin(t * (rank == "S" and 3 or 1.6))
+				local k = Config.glow * tier.power * pulse
+				for _, layer in ipairs(blooms) do
+					layer.BackgroundTransparency = math.clamp(1 - 0.09 * k, 0, 1)
+				end
+			end,
+		}
+	end
+
+	addRow(info, "NAME", 36, 100).Text = player.DisplayName
+	addRow(info, "TITLE", 62, 100).Text = role.title
+	ui.state = addRow(info, "STATE", 88, 100)
+	ui.mode = addRow(info, "MODE", 114, 100)
+
+	local speed = addCard(page, "SPEED", 298, 0, 288, 150)
+	addBloom(speed, UDim2.fromOffset(144, 78), 170, 6, 0.93)
+	ui.hero = label(speed, {
+		TextSize = 60, Font = Fonts.black, Glow = true, TextXAlignment = Enum.TextXAlignment.Center,
+		Position = UDim2.fromOffset(0, 40), Size = UDim2.fromOffset(288, 64),
+	})
+	ui.heroSub = label(speed, {
+		TextSize = 12, Role = "trim", TextXAlignment = Enum.TextXAlignment.Center,
+		Position = UDim2.fromOffset(0, 112), Size = UDim2.fromOffset(288, 18),
+	})
+
+	local vitals = addCard(page, "VITALS", 0, 160, CONTENT_W, 96)
+	local function addBar(caption, y)
+		label(vitals, { Text = caption, TextSize = 12, Font = Fonts.bold, Role = "trim", Position = UDim2.fromOffset(14, y), Size = UDim2.fromOffset(40, 18) })
+		local track = bind(create("Frame", {
+			Position = UDim2.fromOffset(56, y + 2), Size = UDim2.fromOffset(410, 14), BackgroundTransparency = 0.2, BorderSizePixel = 0,
+		}, vitals), "BackgroundColor3", "panel")
+		outline(track, 0.4)
+		local inset = create("Frame", { Position = UDim2.fromOffset(2, 2), Size = UDim2.new(1, -4, 1, -4), BackgroundTransparency = 1 }, track)
+		local fill = bind(create("Frame", { Size = UDim2.fromScale(0, 1), BorderSizePixel = 0 }, inset), "BackgroundColor3", "accent")
+		local value = label(vitals, {
+			TextSize = 12, Font = Fonts.bold, TextXAlignment = Enum.TextXAlignment.Right,
+			Position = UDim2.fromOffset(476, y), Size = UDim2.fromOffset(96, 18),
+		})
+		return fill, value
+	end
+	ui.hpFill, ui.hpValue = addBar("HP", 36)
+	ui.velFill, ui.velValue = addBar("VEL", 64)
+
+	local telemetry = addCard(page, "TELEMETRY", 0, 266, CONTENT_W, 122)
+	local function addCell(caption, column, row)
+		local x, y = 14 + column * 144, 36 + row * 40
+		label(telemetry, { Text = caption, TextSize = 10, Role = "muted", Position = UDim2.fromOffset(x, y), Size = UDim2.fromOffset(120, 12) })
+		return label(telemetry, { TextSize = 17, Font = Fonts.bold, Position = UDim2.fromOffset(x, y + 13), Size = UDim2.fromOffset(120, 22) })
+	end
+	ui.alt, ui.x, ui.y, ui.z = addCell("ALTITUDE", 0, 0), addCell("X", 1, 0), addCell("Y", 2, 0), addCell("Z", 3, 0)
+	ui.fps, ui.ping, ui.time, ui.top = addCell("FPS", 0, 1), addCell("PING", 1, 1), addCell("SESSION", 2, 1), addCell("TOP SPEED", 3, 1)
+	fitPage(page)
+end
+
+-- Tab 2: MOVE (flight, walking, camera and every movement key in one panel) ----
+do
+	local page = addTab(2, "MOVE", "MOVEMENT")
+	local width = CONTENT_W - 28
+	local cursor = 0
+
+	-- Stacks cards top to bottom so adding a row only means changing that card's height.
+	local function section(title, height)
+		local card = addCard(page, title, 0, cursor, CONTENT_W, height)
+		cursor += height + 10
+		return card
+	end
+	local function put(card, key, text, column, row)
+		addToggle(card, { key = key, label = text }, UDim2.fromOffset(14 + column * 112, 36 + row * 40), UDim2.fromOffset(104, 30))
+	end
+	local function slider(card, caption, y, key, min, max, format, round)
+		addSlider(card, caption, 14, y, width, min, max,
+			function() return Config[key] end,
+			function(value)
+				if round then value = math.floor(value + 0.5) end
+				setValue(key, value)
+			end, false, format)
+	end
+	local function pct(value) return string.format("%d%%", math.floor(value * 100 + 0.5)) end
+	local function whole(value) return string.format("%d", math.floor(value + 0.5)) end
+	local function signed(value) return string.format("%+.1f", value) end
+
+	-- FLIGHT ---------------------------------------------------------------
+	local modes = section("FLIGHT MODES", 76)
+	for index, definition in ipairs(TOGGLES) do
+		addToggle(modes, definition, UDim2.fromOffset(14 + (index - 1) * 112, 36), UDim2.fromOffset(104, 30))
+	end
+
+	local attributes = section("ATTRIBUTES", 164)
+	for index, stat in ipairs(STATS) do
+		addStepper(attributes, stat, 14 + math.floor((index - 1) / 3) * 290, 36 + ((index - 1) % 3) * 42)
+	end
+
+	local advanced = section("ADVANCED FLIGHT", 244)
+	put(advanced, "flyPlanar", "PLANAR", 0, 0)
+	put(advanced, "flyCruise", "CRUISE", 1, 0)
+	put(advanced, "flyNoclip", "FLY NOCLIP", 2, 0)
+	put(advanced, "flyWheel", "WHEEL SPEED", 3, 0)
+	put(advanced, "flyLocked", "ANTI OVERRIDE", 4, 0)
+	slider(advanced, "ACCELERATION  (LOW = FLOATY, 100% = INSTANT)", 84, "flyAccel", 0.02, 1, pct)
+	slider(advanced, "BRAKING  (LOW = DRIFTS TO A STOP)", 138, "flyDecel", 0.02, 1, pct)
+	slider(advanced, "BANK TILT  (0 = OFF)", 192, "flyTilt", 0, 45,
+		function(value) return string.format("%d deg", math.floor(value + 0.5)) end, true)
+
+	-- WALKING AND AIR -------------------------------------------------------
+	local walking = section("MOVEMENT", 158)
+	put(walking, "bhop", "BHOP", 0, 0)
+	put(walking, "sprint", "SPRINT", 1, 0)
+	put(walking, "glide", "GLIDE", 2, 0)
+	put(walking, "antiVoid", "ANTI VOID", 3, 0)
+	put(walking, "keepStats", "KEEP STATS", 4, 0)
+	put(walking, "spin", "SPIN", 0, 1)
+	put(walking, "freeze", "FREEZE", 1, 1)
+	put(walking, "clickTp", "CLICK TP", 2, 1)
+	put(walking, "doubleJump", "DOUBLE JUMP", 3, 1)
+	put(walking, "dash", "DASH", 4, 1)
+	put(walking, "fastFall", "FAST FALL", 0, 2)
+	put(walking, "autoWalk", "AUTO WALK", 1, 2)
+	put(walking, "respawnInPlace", "RESPAWN HERE", 2, 2)
+	local recall = addButton(walking, { Text = "RECALL 5S", TextSize = 12, Position = UDim2.fromOffset(14 + 3 * 112, 116), Size = UDim2.fromOffset(104, 30) })
+	local home = addButton(walking, { Text = "TO SPAWN", TextSize = 12, Position = UDim2.fromOffset(14 + 4 * 112, 116), Size = UDim2.fromOffset(104, 30) })
+	recall.Activated:Connect(function() Actions.recall() end)
+	home.Activated:Connect(function() Actions.toSpawn() end)
+
+	local tuning = section("MOVEMENT TUNING", 412)
+	slider(tuning, "SPRINT MULTIPLIER  (HOLD LEFT SHIFT)", 36, "sprintMult", 1, 3,
+		function(value) return string.format("%.1fx", value) end)
+	slider(tuning, "GLIDE FALL SPEED  (MAX DOWNWARD SPEED)", 90, "glideSpeed", 5, 80, whole, true)
+	slider(tuning, "SPIN SPEED", 144, "spinSpeed", 30, 1440,
+		function(value) return string.format("%d deg/s", math.floor(value + 0.5)) end, true)
+	slider(tuning, "DASH POWER", 198, "dashPower", 20, 250, whole, true)
+	slider(tuning, "DASH COOLDOWN", 252, "dashCooldown", 0.2, 5,
+		function(value) return string.format("%.1fs", value) end)
+	slider(tuning, "FAST FALL SPEED", 306, "fallSpeed", 30, 400, whole, true)
+	slider(tuning, "HIP HEIGHT OFFSET", 360, "hipOffset", -2, 4, signed)
+
+	-- CAMERA ----------------------------------------------------------------
+	local camera = section("CAMERA", 290)
+	put(camera, "zoom", "ZOOM", 0, 0)
+	put(camera, "unlockZoom", "UNLOCK ZOOM", 1, 0)
+	put(camera, "firstPerson", "1ST PERSON", 2, 0)
+	put(camera, "dynamicFov", "DYNAMIC FOV", 3, 0)
+	slider(camera, "ZOOM FIELD OF VIEW", 76, "zoomFov", 10, 60,
+		function(value) return string.format("%d deg", math.floor(value + 0.5)) end, true)
+	slider(camera, "FOV KICK AT TOP SPEED", 130, "fovKick", 0, 60,
+		function(value) return string.format("+%d deg", math.floor(value + 0.5)) end, true)
+	slider(camera, "CAMERA HEIGHT OFFSET", 184, "camOffsetY", -4, 4, signed)
+	slider(camera, "MAX ZOOM DISTANCE", 238, "maxZoom", 5, 1000, whole, true)
+
+	-- KEYS ------------------------------------------------------------------
+	local keys = section("MOVEMENT KEYS", 158)
+	addKeybind(keys, "FLY KEY", "flyKey", 14, 36, 170, 30)
+	addKeybind(keys, "MENU KEY", "menuKey", 192, 36, 200, 30)
+	local reset = addButton(keys, { Text = "RESET ATTRIBUTES", TextSize = 12, Position = UDim2.fromOffset(400, 36), Size = UDim2.fromOffset(172, 30) })
+	reset.Activated:Connect(function()
+		for key, default in pairs(DEFAULTS) do steppers[key](default) end
+		notify("ATTRIBUTES RESET")
+	end)
+	addKeybind(keys, "UP KEY", "upKey", 14, 76, 170, 30)
+	addKeybind(keys, "DOWN KEY", "downKey", 192, 76, 200, 30)
+	addKeybind(keys, "CLICK TP KEY", "clickTpKey", 14, 116, 170, 30)
+	addKeybind(keys, "ZOOM KEY", "zoomKey", 192, 116, 200, 30)
+	addKeybind(keys, "DASH KEY", "dashKey", 400, 116, 172, 30)
+	fitPage(page)
+end
+
+-- Tab 3: WORLD -----------------------------------------------------------------
+do
+	local page = addTab(3, "WORLD", "WORLD SETTINGS")
+	local width = CONTENT_W - 28
+
+	local environment = addCard(page, "ENVIRONMENT", 0, 0, CONTENT_W, 118)
+	addToggle(environment, { key = "fullbright", label = "FULLBRIGHT" }, UDim2.fromOffset(14, 36), UDim2.fromOffset(130, 30))
+	addToggle(environment, { key = "shadows", label = "SHADOWS" }, UDim2.fromOffset(152, 36), UDim2.fromOffset(130, 30))
+	addToggle(environment, { key = "noFog", label = "NO FOG" }, UDim2.fromOffset(290, 36), UDim2.fromOffset(130, 30))
+	addToggle(environment, { key = "lite", label = "LITE MODE" }, UDim2.fromOffset(428, 36), UDim2.fromOffset(130, 30))
+	addToggle(environment, { key = "freezeTime", label = "FREEZE TIME" }, UDim2.fromOffset(14, 76), UDim2.fromOffset(130, 30))
+	addToggle(environment, { key = "noEffects", label = "NO EFFECTS" }, UDim2.fromOffset(152, 76), UDim2.fromOffset(130, 30))
+	addToggle(environment, { key = "noFx", label = "NO PARTICLES" }, UDim2.fromOffset(290, 76), UDim2.fromOffset(130, 30))
+
+	local sliders = addCard(page, "ADJUSTMENTS", 0, 128, CONTENT_W, 250)
+	addSlider(sliders, "GRAPHICS QUALITY", 14, 36, width, 1, 10, function() return Config.quality end,
+		function(value) setValue("quality", math.floor(value + 0.5)) end, false,
+		function(value) return string.format("%d / 10", value) end)
+	addSlider(sliders, "TIME OF DAY", 14, 90, width, 0, 24, function() return Config.clockTime end,
+		function(value) setValue("clockTime", value) end, false,
+		function(value) return string.format("%02d:%02d", math.floor(value) % 24, math.floor((value % 1) * 60)) end)
+	addSlider(sliders, "GRAVITY", 14, 144, width, 0, 400, function() return Config.gravity end,
+		function(value) setValue("gravity", math.floor(value + 0.5)) end, false,
+		function(value) return string.format("%d", value) end)
+	addSlider(sliders, "EXPOSURE", 14, 198, width, -3, 3, function() return Config.exposure end,
+		function(value) setValue("exposure", value) end, false,
+		function(value) return string.format("%+.1f", value) end)
+	fitPage(page)
+end
+
+-- Tab 4: ESP -------------------------------------------------------------------
+do
+	local page = addTab(4, "ESP", "PLAYER SCANNER")
+	local width = CONTENT_W - 28
+
+	local scanner = addCard(page, "SCANNER", 0, 0, CONTENT_W, 198)
+	local function place(definition, column, row)
+		addToggle(scanner, definition, UDim2.fromOffset(14 + column * 140, 36 + row * 40), UDim2.fromOffset(134, 30))
+	end
+	place({ key = "esp", label = "ESP" }, 0, 0)
+	place({ key = "espNames", label = "NAMES" }, 1, 0)
+	place({ key = "espHealth", label = "HEALTH" }, 2, 0)
+	place({ key = "espDist", label = "DISTANCE" }, 3, 0)
+	place({ key = "tracers", label = "TRACERS" }, 0, 1)
+	place({ key = "charms", label = "CHARMS" }, 1, 1)
+	place({ key = "espBox", label = "BOX" }, 2, 1)
+	place({ key = "espRainbow", label = "RAINBOW" }, 3, 1)
+	place({ key = "espTeamCheck", label = "TEAM CHECK" }, 0, 2)
+	place({ key = "espTeamColor", label = "TEAM COLOR" }, 1, 2)
+	place({ key = "espSkeleton", label = "SKELETON" }, 2, 2)
+	place({ key = "espHealthBar", label = "HP BAR" }, 3, 2)
+	place({ key = "espLook", label = "LOOK LINE" }, 0, 3)
+	place({ key = "espArrows", label = "ARROWS" }, 1, 3)
+	place({ key = "espVisibleOnly", label = "VISIBLE ONLY" }, 2, 3)
+
+	local look = addCard(page, "TAG AND BOX", 0, 208, CONTENT_W, 250)
+	addSlider(look, "TAG SIZE", 14, 36, width, 0.4, 1.5, function() return Config.espTagScale end,
+		function(value) Config.espTagScale = value end, false,
+		function(value) return string.format("%d%%", math.floor(value * 100 + 0.5)) end)
+	addSlider(look, "TAG BACKGROUND  (0% = SOLID)", 14, 90, width, 0, 1, function() return Config.espTagBg end,
+		function(value) Config.espTagBg = value end, false,
+		function(value) return string.format("%d%%", math.floor(value * 100 + 0.5)) end)
+	addSlider(look, "BOX SIZE", 14, 144, width, 0.5, 1.5, function() return Config.espBoxScale end,
+		function(value) Config.espBoxScale = value end, false,
+		function(value) return string.format("%d%%", math.floor(value * 100 + 0.5)) end)
+	addSlider(look, "MAX DISTANCE", 14, 198, width, 100, 5000, function() return Config.espMaxDist end,
+		function(value) Config.espMaxDist = math.floor(value / 50 + 0.5) * 50 end, false,
+		function(value) return value >= 5000 and "UNLIMITED" or string.format("%d studs", value) end)
+
+	local legend = addCard(page, "LEGEND", 0, 468, CONTENT_W, 106)
+	label(legend, { Text = "GOLD  =  CLEAR LINE OF SIGHT TO THE PLAYER", TextSize = 12, Role = "trim", Position = UDim2.fromOffset(14, 36), Size = UDim2.new(1, -28, 0, 16) })
+	label(legend, { Text = "THEME / TEAM / RAINBOW COLOR  =  BLOCKED BY A WALL", TextSize = 12, Role = "line", Position = UDim2.fromOffset(14, 58), Size = UDim2.new(1, -28, 0, 16) })
+	label(legend, { Text = "RED  =  YOUR CURRENT AIMLOCK TARGET", TextSize = 12, Font = Fonts.bold, Position = UDim2.fromOffset(14, 80), Size = UDim2.new(1, -28, 0, 16) }).TextColor3 = RED
+	fitPage(page)
+end
+
+-- Tab 5: AIM -------------------------------------------------------------------
+do
+	local page = addTab(5, "AIM", "TARGET LOCK")
+	local width = CONTENT_W - 28
+
+	local lock = addCard(page, "TARGET LOCK", 0, 0, CONTENT_W, 118)
+	addToggle(lock, { key = "aimlock", label = "AIMLOCK" }, UDim2.fromOffset(14, 36), UDim2.fromOffset(180, 30))
+	addToggle(lock, { key = "aimPing", label = "PING COMP" }, UDim2.fromOffset(206, 36), UDim2.fromOffset(180, 30))
+	addToggle(lock, { key = "aimWalls", label = "WALL CHECK" }, UDim2.fromOffset(398, 36), UDim2.fromOffset(174, 30))
+	addToggle(lock, { key = "aimTeamCheck", label = "TEAM CHECK" }, UDim2.fromOffset(14, 76), UDim2.fromOffset(180, 30))
+	addToggle(lock, { key = "aimFovCircle", label = "FOV CIRCLE" }, UDim2.fromOffset(206, 76), UDim2.fromOffset(180, 30))
+
+	local tuning = addCard(page, "TUNING", 0, 128, CONTENT_W, 196)
+	addSlider(tuning, "SMOOTHNESS  (0% = SNAP)", 14, 36, width, 0, 0.95, function() return Config.aimSmooth end,
+		function(value) Config.aimSmooth = value end, false,
+		function(value) return string.format("%d%%", math.floor(value * 100 + 0.5)) end)
+	addSlider(tuning, "PING COMPENSATION STRENGTH", 14, 90, width, 0, 2, function() return Config.aimPingScale end,
+		function(value) Config.aimPingScale = value end, false,
+		function(value) return string.format("%.1fx", value) end)
+	addSlider(tuning, "LOCK RADIUS", 14, 144, width, 50, 800, function() return Config.aimRadius end,
+		function(value) Config.aimRadius = math.floor(value + 0.5) end, false,
+		function(value) return string.format("%d px", value) end)
+
+	local binds = addCard(page, "BINDS", 0, 334, CONTENT_W, 76)
+	addKeybind(binds, "AIM KEY", "aimKey", 14, 36, 180, 30)
+	local partButton = addButton(binds, { TextSize = 12, Position = UDim2.fromOffset(202, 36), Size = UDim2.fromOffset(180, 30) })
+	local function refreshPart() partButton.Text = "AIM AT: " .. (Config.aimPart == "Head" and "HEAD" or "BODY") end
+	partButton.Activated:Connect(function()
+		Config.aimPart = Config.aimPart == "Head" and "HumanoidRootPart" or "Head"
+		refreshPart()
+	end)
+	table.insert(refreshers, refreshPart)
+	refreshPart()
+	label(binds, {
+		Text = "HOLD THE AIM KEY TO LOCK  (OR TOGGLE MODE)", TextSize = 9, Role = "muted", TextXAlignment = Enum.TextXAlignment.Right,
+		Position = UDim2.fromOffset(390, 42), Size = UDim2.fromOffset(182, 18),
+	})
+
+	-- Targeting rules.
+	local targeting = addCard(page, "TARGETING", 0, 420, CONTENT_W, 280)
+	local function put(key, text, column, row)
+		addToggle(targeting, { key = key, label = text }, UDim2.fromOffset(14 + column * 140, 36 + row * 40), UDim2.fromOffset(134, 30))
+	end
+	put("aimToggleMode", "TOGGLE MODE", 0, 0)
+	put("aimSticky", "STICKY", 1, 0)
+	put("aimSkipShield", "SKIP SHIELD", 2, 0)
+	put("aimMarker", "MARKER", 3, 0)
+	put("aimHard", "HARD LOCK", 0, 1)
+	put("aimOverride", "OVERRIDE CAM", 1, 1)
+	addSlider(targeting, "TARGET PRIORITY", 14, 116, width, 1, 3, function() return Config.aimPriority end,
+		function(value) Config.aimPriority = math.floor(value + 0.5) end, false,
+		function(value) return ({ "CROSSHAIR", "DISTANCE", "LOW HP" })[math.clamp(math.floor(value + 0.5), 1, 3)] end)
+	addSlider(targeting, "MAX DISTANCE", 14, 170, width, 100, 5000, function() return Config.aimMaxDist end,
+		function(value) Config.aimMaxDist = math.floor(value / 50 + 0.5) * 50 end, false,
+		function(value) return string.format("%d studs", value) end)
+	addSlider(targeting, "LOCK GRACE  (HOLD THE LOCK IF THE TARGET IS LOST)", 14, 224, width, 0, 2, function() return Config.aimGrace end,
+		function(value) Config.aimGrace = value end, false,
+		function(value) return string.format("%.1fs", value) end)
+	fitPage(page)
+end
+
+-- Tab 6: LIST (whitelist, teleport, spectate) ----------------------------------
+do
+	local page = addTab(6, "LIST", "PLAYER LIST")
+	local card = addCard(page, "PLAYERS", 0, 0, CONTENT_W, CONTENT_H)
+
+	addToggle(card, { key = "aimWhitelist", label = "WHITELIST ONLY" }, UDim2.fromOffset(14, 34), UDim2.fromOffset(180, 28))
+	local allButton = addButton(card, { Text = "ALL", TextSize = 12, Position = UDim2.fromOffset(412, 34), Size = UDim2.fromOffset(76, 28) })
+	local noneButton = addButton(card, { Text = "NONE", TextSize = 12, Position = UDim2.fromOffset(496, 34), Size = UDim2.fromOffset(76, 28) })
+	label(card, {
+		Text = "CLICK A NAME TO ALLOW IT AS AN AIM TARGET   |   TP = TELEPORT TO PLAYER   |   VIEW = SPECTATE",
+		TextSize = 9, Role = "muted", Position = UDim2.fromOffset(14, 64), Size = UDim2.new(1, -28, 0, 12),
+	})
+
+	local scroll = create("ScrollingFrame", {
+		Position = UDim2.fromOffset(14, 82), Size = UDim2.fromOffset(CONTENT_W - 28, CONTENT_H - 94),
+		BackgroundTransparency = 1, BorderSizePixel = 0, ScrollBarThickness = 4,
+		CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y,
+	}, card)
+	bind(scroll, "ScrollBarImageColor3", "accent")
+	create("UIListLayout", { Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.Name }, scroll)
+
+	local rows = {}
+	local function addRow(other)
+		if other == player or rows[other] then return end
+		local holder = create("Frame", {
+			Name = string.lower(other.DisplayName) .. other.UserId,
+			Size = UDim2.new(1, -8, 0, 28), BackgroundTransparency = 1,
+		}, scroll)
+		local pick = addButton(holder, { Size = UDim2.new(1, -132, 1, 0), TextSize = 12 })
+		local teleport = addButton(holder, { Text = "TP", TextSize = 11, Position = UDim2.new(1, -126, 0, 0), Size = UDim2.fromOffset(60, 28) })
+		local view = addButton(holder, { TextSize = 11, Position = UDim2.new(1, -62, 0, 0), Size = UDim2.fromOffset(62, 28) })
+
+		local renderKey = "whitelist" .. other.UserId
+		local function render()
+			local on = Config.whitelist[other.UserId] == true
+			pick.Text = string.format("%s  (@%s)%s", other.DisplayName, other.Name, on and "   [ ALLOWED ]" or "")
+			pick.BackgroundColor3 = on and Colors.accent or Colors.panel
+			pick.BackgroundTransparency = on and 0.45 or 0.3
+			pick.TextColor3 = on and Colors.text or Colors.muted
+			local viewing = Actions.viewing == other
+			view.Text = viewing and "STOP" or "VIEW"
+			view.BackgroundColor3 = viewing and Colors.accent or Colors.panel
+			view.BackgroundTransparency = viewing and 0.45 or 0.3
+		end
+		pick.Activated:Connect(function()
+			Config.whitelist[other.UserId] = (not Config.whitelist[other.UserId]) or nil
+			render()
+		end)
+		teleport.Activated:Connect(function() Actions.teleportTo(other) end)
+		view.Activated:Connect(function() Actions.view(other) end)
+		renderers[renderKey] = render
+		rows[other] = { row = holder, key = renderKey }
+		render()
+	end
+	local function removeRow(other)
+		if Actions.viewing == other then Actions.stopView() end
+		local entry = rows[other]
+		if not entry then return end
+		rows[other] = nil
+		renderers[entry.key] = nil
+		entry.row:Destroy()
+	end
+	for _, other in ipairs(Players:GetPlayers()) do addRow(other) end
+	Players.PlayerAdded:Connect(addRow)
+	Players.PlayerRemoving:Connect(removeRow)
+
+	allButton.Activated:Connect(function()
+		for other, entry in pairs(rows) do
+			Config.whitelist[other.UserId] = true
+			renderers[entry.key]()
+		end
+	end)
+	noneButton.Activated:Connect(function()
+		for other, entry in pairs(rows) do
+			Config.whitelist[other.UserId] = nil
+			renderers[entry.key]()
+		end
+	end)
+	fitPage(page)
+end
+
+-- Tab 7: MISC ------------------------------------------------------------------
+do
+	local page = addTab(7, "MISC", "UTILITIES")
+	local width = CONTENT_W - 28
+
+	local utility = addCard(page, "UTILITY", 0, 0, CONTENT_W, 118)
+	addToggle(utility, { key = "antiAfk", label = "ANTI AFK" }, UDim2.fromOffset(14, 36), UDim2.fromOffset(134, 30))
+	addToggle(utility, { key = "hud", label = "HUD" }, UDim2.fromOffset(154, 36), UDim2.fromOffset(134, 30))
+	addToggle(utility, { key = "crosshair", label = "CROSSHAIR" }, UDim2.fromOffset(294, 36), UDim2.fromOffset(134, 30))
+	addToggle(utility, { key = "notifications", label = "NOTIFICATIONS" }, UDim2.fromOffset(434, 36), UDim2.fromOffset(138, 30))
+	local resetChar = addButton(utility, { Text = "RESET CHARACTER", TextSize = 12, Position = UDim2.fromOffset(14, 76), Size = UDim2.fromOffset(180, 30) })
+	local rejoin = addButton(utility, { Text = "REJOIN SERVER", TextSize = 12, Position = UDim2.fromOffset(202, 76), Size = UDim2.fromOffset(180, 30) })
+	local resetAll = addButton(utility, { Text = "RESET ALL SETTINGS", TextSize = 12, Position = UDim2.fromOffset(390, 76), Size = UDim2.fromOffset(182, 30) })
+	resetChar.Activated:Connect(Actions.resetCharacter)
+	rejoin.Activated:Connect(Actions.rejoin)
+	resetAll.Activated:Connect(function()
+		applyConfig({})
+		notify("ALL SETTINGS RESET")
+	end)
+
+	local points = addCard(page, "WAYPOINTS", 0, 128, CONTENT_W, 140)
+	for index = 1, 3 do
+		local y = 36 + (index - 1) * 34
+		label(points, { Text = "WAYPOINT " .. index, TextSize = 12, Font = Fonts.bold, Role = "trim", Position = UDim2.fromOffset(14, y + 4), Size = UDim2.fromOffset(110, 20) })
+		local set = addButton(points, { Text = "SET HERE", TextSize = 11, Position = UDim2.fromOffset(130, y), Size = UDim2.fromOffset(100, 26) })
+		local go = addButton(points, { Text = "GO", TextSize = 11, Position = UDim2.fromOffset(238, y), Size = UDim2.fromOffset(70, 26) })
+		local readout = label(points, { TextSize = 11, Role = "muted", Position = UDim2.fromOffset(320, y + 4), Size = UDim2.fromOffset(250, 20) })
+		set.Activated:Connect(function() Actions.setWaypoint(index) end)
+		go.Activated:Connect(function() Actions.gotoWaypoint(index) end)
+		renderers["waypoint" .. index] = function()
+			local saved = Actions.waypoints[index]
+			readout.Text = saved and string.format("%d, %d, %d", math.floor(saved.X), math.floor(saved.Y), math.floor(saved.Z)) or "EMPTY"
+		end
+		renderers["waypoint" .. index]()
+	end
+
+	local crosshair = addCard(page, "CROSSHAIR", 0, 278, CONTENT_W, 76)
+	addSlider(crosshair, "CROSSHAIR SIZE", 14, 36, width, 4, 40, function() return Config.crosshairSize end,
+		function(value) Config.crosshairSize = math.floor(value + 0.5) end, false,
+		function(value) return string.format("%d px", value) end)
+	fitPage(page)
+end
+
+-- Tab 8: CONFIG ----------------------------------------------------------------
+do
+	local page = addTab(8, "CONFIG", "CONFIGURATIONS")
+	local width = CONTENT_W - 28
+
+	local saveCard = addCard(page, "SAVE CURRENT SETTINGS", 0, 0, CONTENT_W, 76)
+	local nameBox = addTextBox(saveCard, {
+		PlaceholderText = "CONFIG NAME", MaxVisibleGraphemes = -1,
+		Position = UDim2.fromOffset(14, 36), Size = UDim2.fromOffset(380, 30),
+	})
+	local saveButton = addButton(saveCard, { Text = "SAVE", TextSize = 12, Position = UDim2.fromOffset(402, 36), Size = UDim2.fromOffset(170, 30) })
+
+	local listCard = addCard(page, "SAVED CONFIGS", 0, 86, CONTENT_W, 214)
+	local scroll = create("ScrollingFrame", {
+		Position = UDim2.fromOffset(14, 36), Size = UDim2.fromOffset(width, 166),
+		BackgroundTransparency = 1, BorderSizePixel = 0, ScrollBarThickness = 4,
+		CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y,
+	}, listCard)
+	bind(scroll, "ScrollBarImageColor3", "accent")
+	create("UIListLayout", { Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder }, scroll)
+
+	-- Built-in presets are stored as differences from the defaults; yours are full copies of the settings at save time.
+	local configs = {
+		{ name = "DEFAULT", data = DEFAULT_CONFIG, builtin = true },
+		{
+			name = "ESP PRESET", builtin = true,
+			data = { esp = true, espBox = true, espNames = true, espHealth = true, espDist = true, espTeamCheck = true, espTagScale = 0.6 },
+		},
+		{
+			name = "SPEED RUN", builtin = true,
+			data = { flySpeed = 250, verticalSpeed = 150, boost = 4, smooth = false, sprint = true, sprintMult = 2, bhop = true, glide = true },
+		},
+	}
+	local MAX_USER_CONFIGS = 25
+
+	-- Persistence: uses writefile/readfile when the environment provides them (survives rejoining),
+	-- otherwise configs last for this session only. Everything is pcall-guarded.
+	local FILE = "FlightMenuConfigs.json"
+	local env = getfenv()
+	local canFile = typeof(env.writefile) == "function" and typeof(env.readfile) == "function" and typeof(env.isfile) == "function"
+	local canCopy = typeof(env.setclipboard) == "function"
+
+	local function pack(data)
+		local out = {}
+		for key, value in pairs(data) do
+			out[key] = typeof(value) == "EnumItem" and ("key:" .. value.Name) or value
+		end
+		return out
+	end
+
+	local function persist()
+		if not canFile then return end
+		local list = {}
+		for _, entry in ipairs(configs) do
+			if not entry.builtin then table.insert(list, { name = entry.name, data = pack(entry.data) }) end
+		end
+		pcall(function() env.writefile(FILE, HttpService:JSONEncode({ version = 1, configs = list })) end)
+	end
+
+	-- Loaded files go through decodeConfig, so a hand-edited file cannot inject bad values.
+	local function restore()
+		if not canFile then return end
+		pcall(function()
+			if not env.isfile(FILE) then return end
+			local decoded = HttpService:JSONDecode(env.readfile(FILE))
+			if typeof(decoded) ~= "table" or typeof(decoded.configs) ~= "table" then return end
+			for _, item in ipairs(decoded.configs) do
+				if typeof(item) == "table" and typeof(item.name) == "string" and typeof(item.data) == "table"
+					and #configs - 3 < MAX_USER_CONFIGS then
+					table.insert(configs, { name = string.sub(string.upper(item.name), 1, 24), data = decodeConfig(item.data) })
+				end
+			end
+		end)
+	end
+	local savedNote = canFile and "" or "  (SESSION ONLY)"
+
+	local function rebuild()
+		for _, child in ipairs(scroll:GetChildren()) do
+			if child:IsA("Frame") then child:Destroy() end
+		end
+		for index, entry in ipairs(configs) do
+			local row = create("Frame", { LayoutOrder = index, Size = UDim2.new(1, -8, 0, 28), BackgroundTransparency = 1 }, scroll)
+			local name = addButton(row, { Text = (entry.builtin and "[ PRESET ]  " or "") .. entry.name, TextSize = 12, Size = UDim2.new(1, entry.builtin and -72 or -140, 1, 0) })
+			name.TextXAlignment = Enum.TextXAlignment.Left
+			create("UIPadding", { PaddingLeft = UDim.new(0, 10) }, name)
+			local load = addButton(row, { Text = "LOAD", TextSize = 11, Position = UDim2.new(1, -68, 0, 0), Size = UDim2.fromOffset(68, 28) })
+			load.Activated:Connect(function()
+				applyConfig(entry.data)
+				notify("CONFIG LOADED: " .. entry.name)
+			end)
+			name.Activated:Connect(function()
+				if not entry.builtin then nameBox.Text = entry.name end
+			end)
+			if not entry.builtin then
+				local delete = addButton(row, { Text = "DELETE", TextSize = 11, Position = UDim2.new(1, -140, 0, 0), Size = UDim2.fromOffset(68, 28) })
+				delete.Activated:Connect(function()
+					table.remove(configs, index)
+					persist()
+					rebuild()
+					notify("CONFIG DELETED")
+				end)
+			end
+		end
+	end
+
+	saveButton.Activated:Connect(function()
+		local name = string.upper((string.gsub(nameBox.Text, "^%s*(.-)%s*$", "%1")))
+		name = string.sub(name, 1, 24)
+		if name == "" then name = "CONFIG " .. (#configs - 2) end
+		for _, entry in ipairs(configs) do
+			if entry.builtin and entry.name == name then
+				notify("THAT NAME IS A PRESET")
+				return
+			end
+		end
+		local data = capture(false)
+		for _, entry in ipairs(configs) do
+			if entry.name == name then
+				entry.data = data
+				persist()
+				notify("CONFIG UPDATED: " .. name .. savedNote)
+				return
+			end
+		end
+		if #configs - 3 >= MAX_USER_CONFIGS then
+			notify("CONFIG LIST IS FULL")
+			return
+		end
+		table.insert(configs, { name = name, data = data })
+		persist()
+		nameBox.Text = ""
+		rebuild()
+		notify("CONFIG SAVED: " .. name .. savedNote)
+	end)
+	restore()
+	rebuild()
+
+	local share = addCard(page, "IMPORT / EXPORT", 0, 310, CONTENT_W, 118)
+	local codeBox = addTextBox(share, {
+		PlaceholderText = "PASTE A CONFIG CODE HERE, OR PRESS EXPORT",
+		Position = UDim2.fromOffset(14, 36), Size = UDim2.fromOffset(width, 30),
+	})
+	local exportButton = addButton(share, { Text = "EXPORT CURRENT", TextSize = 12, Position = UDim2.fromOffset(14, 76), Size = UDim2.fromOffset(170, 28) })
+	local importButton = addButton(share, { Text = "IMPORT CODE", TextSize = 12, Position = UDim2.fromOffset(192, 76), Size = UDim2.fromOffset(170, 28) })
+	label(share, {
+		Text = canFile and "CONFIGS AUTO-SAVE TO FlightMenuConfigs.json" or "SAVED CONFIGS LAST FOR THIS SESSION ONLY - COPY THE CODE TO KEEP IT", TextSize = 9, Role = "muted",
+		TextXAlignment = Enum.TextXAlignment.Right, Position = UDim2.fromOffset(370, 82), Size = UDim2.fromOffset(202, 16),
+	})
+	exportButton.Activated:Connect(function()
+		codeBox.Text = exportConfig()
+		if canCopy then pcall(env.setclipboard, codeBox.Text) end
+		notify(canCopy and "CODE COPIED" or "CONFIG EXPORTED")
+	end)
+	importButton.Activated:Connect(function()
+		local ok, decoded = pcall(function() return HttpService:JSONDecode(codeBox.Text) end)
+		if not ok or typeof(decoded) ~= "table" then
+			notify("INVALID CONFIG CODE")
+			return
+		end
+		applyConfig(decodeConfig(decoded))
+		notify("CONFIG IMPORTED")
+	end)
+	fitPage(page)
+end
+
+-- Tab 9: SETTINGS --------------------------------------------------------------
+do
+	local page = addTab(9, "SETTINGS", "SYSTEM SETTINGS")
+	local width = CONTENT_W - 28
+
+	local theme = addCard(page, "THEME", 0, 0, CONTENT_W, 292)
+	for index, hue in ipairs(PRESETS) do
+		local swatch = addButton(theme, {
+			Text = "", BackgroundColor3 = Color3.fromHSV(hue, 0.75, 1), BackgroundTransparency = 0,
+			Position = UDim2.fromOffset(14 + (index - 1) * 70, 36), Size = UDim2.fromOffset(62, 22),
+		})
+		swatch.Activated:Connect(function() setHue(hue) end)
+	end
+	addSlider(theme, "CUSTOM HUE", 14, 72, width, 0, 1, function() return Config.hue end, setHue, true,
+		function(value) return string.format("%d deg", math.floor(value * 360 + 0.5)) end)
+	addSlider(theme, "GLOW INTENSITY", 14, 126, width, 0, 1, function() return Config.glow end,
+		function(value) Config.glow = value applyGlow() end, false,
+		function(value) return string.format("%d%%", math.floor(value * 100 + 0.5)) end)
+	addSlider(theme, "PARTICLE FLOW SPEED", 14, 180, width, 0.2, 3, function() return Config.flow end,
+		function(value) Config.flow = value end, false,
+		function(value) return string.format("%.1fx", value) end)
+	addSlider(theme, "MENU SIZE", 14, 234, width, 0.6, 1.2, function() return Config.uiScale end,
+		function(value) setValue("uiScale", value) end, false,
+		function(value) return string.format("%d%%", math.floor(value * 100 + 0.5)) end)
+
+	local options = addCard(page, "OPTIONS", 0, 302, CONTENT_W, 76)
+	addToggle(options, { key = "stars", label = "STARS" }, UDim2.fromOffset(14, 36), UDim2.fromOffset(130, 30))
+	addToggle(options, { key = "particles", label = "PARTICLES" }, UDim2.fromOffset(152, 36), UDim2.fromOffset(130, 30))
+	local replay = addButton(options, { Text = "REPLAY INTRO", TextSize = 12, Position = UDim2.fromOffset(290, 36), Size = UDim2.fromOffset(150, 30) })
+	replay.Activated:Connect(function()
+		if introPlaying then return end
+		task.spawn(playIntro)
+	end)
+	fitPage(page)
+end
+
+--------------------------------------------------------------------------------
+-- Tabs 10 and 11: EXTRAS and INTERFACE
+--------------------------------------------------------------------------------
+
+local function pct(value) return string.format("%d%%", math.floor(value * 100 + 0.5)) end
+local function whole(value) return string.format("%d", math.floor(value + 0.5)) end
+
+-- Tab 10: EXTRAS (alerts, world grade, hotkeys; movement lives in the MOVE tab) --
+do
+	local page = addTab(10, "EXTRAS", "EXTRA FEATURES")
+	local width = CONTENT_W - 28
+
+	local function put(card, key, text, column, row)
+		addToggle(card, { key = key, label = text }, UDim2.fromOffset(14 + column * 112, 36 + row * 40), UDim2.fromOffset(104, 30))
+	end
+	local function slider(card, caption, y, key, min, max, format, round)
+		addSlider(card, caption, 14, y, width, min, max,
+			function() return Config[key] end,
+			function(value)
+				if round then value = math.floor(value + 0.5) end
+				setValue(key, value)
+			end, false, format)
+	end
+
+	local alerts = addCard(page, "ALERTS AND HOTKEYS", 0, 0, CONTENT_W, 76)
+	put(alerts, "lowHpWarn", "LOW HP WARN", 0, 0)
+	put(alerts, "joinAlerts", "JOIN ALERTS", 1, 0)
+	put(alerts, "hotkeys", "HOTKEYS", 2, 0)
+
+	local grade = addCard(page, "WORLD GRADE", 0, 86, CONTENT_W, 300)
+	slider(grade, "TIME FLOW  (GAME HOURS PER MINUTE, 0 = OFF)", 36, "timeFlow", 0, 12, function(v) return string.format("%.1f", v) end)
+	slider(grade, "SATURATION", 90, "gradeSat", -1, 2, function(v) return string.format("%+.2f", v) end)
+	slider(grade, "CONTRAST", 144, "gradeContrast", -0.5, 1, function(v) return string.format("%+.2f", v) end)
+	slider(grade, "BRIGHTNESS", 198, "gradeBright", -0.5, 0.5, function(v) return string.format("%+.2f", v) end)
+	slider(grade, "BLUR", 252, "blurSize", 0, 40, whole, true)
+
+	local keys = addCard(page, "KEYS  (HOTKEYS NEEDS THE TOGGLE ABOVE)", 0, 396, CONTENT_W, 118)
+	addKeybind(keys, "NOCLIP", "noclipKey", 14, 36, 176, 30)
+	addKeybind(keys, "FULLBRIGHT", "fullbrightKey", 198, 36, 190, 30)
+	addKeybind(keys, "ESP", "espKey", 14, 76, 176, 30)
+	addKeybind(keys, "PANIC", "panicKey", 198, 76, 176, 30)
+	label(keys, {
+		Text = "PANIC = RESET ALL + HIDE MENU", TextSize = 9, Role = "muted", TextXAlignment = Enum.TextXAlignment.Right,
+		Position = UDim2.fromOffset(398, 82), Size = UDim2.fromOffset(174, 16),
+	})
+	fitPage(page)
+end
+
+-- Tab 11: INTERFACE ------------------------------------------------------------
+do
+	local page = addTab(11, "INTERFACE", "INTERFACE EDITOR")
+	local width = CONTENT_W - 28
+	local lockedPosition
+
+	-- Font families: { name, regular, bold, black }.
+	local FAMILIES = {
+		{ "GOTHAM", Enum.Font.GothamMedium, Enum.Font.GothamBold, Enum.Font.GothamBlack },
+		{ "SCI-FI", Enum.Font.SciFi, Enum.Font.SciFi, Enum.Font.SciFi },
+		{ "CODE", Enum.Font.Code, Enum.Font.Code, Enum.Font.Code },
+		{ "UBUNTU", Enum.Font.Ubuntu, Enum.Font.Ubuntu, Enum.Font.Ubuntu },
+		{ "ARCADE", Enum.Font.Arcade, Enum.Font.Arcade, Enum.Font.Arcade },
+	}
+	local WEIGHT = { [Enum.Font.GothamMedium] = 1, [Enum.Font.GothamBold] = 2, [Enum.Font.GothamBlack] = 3 }
+	local weights = setmetatable({}, { __mode = "k" })
+
+	local function applyFont(index)
+		local family = FAMILIES[index]
+		Fonts.regular, Fonts.bold, Fonts.black = family[2], family[3], family[4] -- new widgets use it too
+		for _, object in ipairs(gui:GetDescendants()) do
+			if object:IsA("TextLabel") or object:IsA("TextButton") or object:IsA("TextBox") then
+				local weight = weights[object]
+				if not weight then
+					weight = WEIGHT[object.Font] or 2
+					weights[object] = weight
+				end
+				object.Font = family[weight + 1]
+			end
+		end
+	end
+
+	Handlers.fontFamily = function(value) applyFont(math.clamp(math.floor(value + 0.5), 1, #FAMILIES)) end
+	Handlers.uiOpacity = function(value) main.BackgroundTransparency = value end
+	Handlers.halo = function(enabled) halo.Visible = enabled end
+	Handlers.sweep = function(enabled) sweepBar.Visible = enabled end
+	Handlers.footerHints = function(enabled) footer.Visible = enabled end
+
+	local window = addCard(page, "WINDOW", 0, 0, CONTENT_W, 190)
+	addSlider(window, "MENU OPACITY  (HIGHER = MORE SEE-THROUGH)", 14, 36, width, 0, 0.7,
+		function() return Config.uiOpacity end, function(value) setValue("uiOpacity", value) end, false, pct)
+	addSlider(window, "NOTIFICATION TIME", 14, 90, width, 0.5, 8,
+		function() return Config.notifyTime end, function(value) Config.notifyTime = value end, false,
+		function(value) return string.format("%.1fs", value) end)
+	for index, item in ipairs({
+		{ "lockWindow", "LOCK WINDOW" }, { "halo", "HALO" }, { "sweep", "HEADER SWEEP" }, { "footerHints", "FOOTER HINTS" },
+	}) do
+		addToggle(window, { key = item[1], label = item[2] }, UDim2.fromOffset(14 + (index - 1) * 112, 148), UDim2.fromOffset(104, 30))
+	end
+
+	local layout = addCard(page, "WINDOW POSITION", 0, 200, CONTENT_W, 76)
+	local function move(dx, dy)
+		local view = workspace.CurrentCamera.ViewportSize
+		local spanX = math.max(0, view.X / 2 - WIN_W * rootScale.Scale / 2 - 16)
+		local spanY = math.max(0, view.Y / 2 - WIN_H * rootScale.Scale / 2 - 16)
+		lockedPosition = nil
+		root.Position = UDim2.new(0.5, dx * spanX, 0.5, dy * spanY)
+	end
+	for index, item in ipairs({
+		{ "CENTER", 0, 0 }, { "LEFT", -1, 0 }, { "RIGHT", 1, 0 }, { "TOP", 0, -1 }, { "BOTTOM", 0, 1 },
+	}) do
+		local button = addButton(layout, {
+			Text = item[1], TextSize = 12, Position = UDim2.fromOffset(14 + (index - 1) * 112, 36), Size = UDim2.fromOffset(104, 30),
+		})
+		button.Activated:Connect(function() move(item[2], item[3]) end)
+	end
+
+	local look = addCard(page, "FONT AND COLOR", 0, 286, CONTENT_W, 130)
+	local fontButton = addButton(look, { TextSize = 12, Position = UDim2.fromOffset(14, 36), Size = UDim2.fromOffset(190, 30) })
+	local function refreshFont()
+		fontButton.Text = "FONT: " .. FAMILIES[math.clamp(math.floor(Config.fontFamily + 0.5), 1, #FAMILIES)][1]
+	end
+	fontButton.Activated:Connect(function()
+		setValue("fontFamily", Config.fontFamily % #FAMILIES + 1)
+		refreshFont()
+	end)
+	table.insert(refreshers, refreshFont)
+	refreshFont()
+	addToggle(look, { key = "rainbowTheme", label = "RAINBOW THEME" }, UDim2.fromOffset(212, 36), UDim2.fromOffset(134, 30))
+	local randomTheme = addButton(look, { Text = "RANDOM THEME", TextSize = 12, Position = UDim2.fromOffset(354, 36), Size = UDim2.fromOffset(218, 30) })
+	randomTheme.Activated:Connect(function() setHue(random:NextNumber()) end)
+	addSlider(look, "RAINBOW SPEED", 14, 76, width, 0.02, 1,
+		function() return Config.rainbowSpeed end, function(value) Config.rainbowSpeed = value end, false,
+		function(value) return string.format("%.2f", value) end)
+
+	-- Living UI: switches for the background and edge animation.
+	local living = addCard(page, "LIVING UI", 0, 426, CONTENT_W, 130)
+	for index, item in ipairs({
+		{ "edgeChase", "EDGE LIGHT" }, { "aurora", "AURORA" }, { "breathe", "BREATHE" }, { "cornerPulse", "CORNERS" },
+	}) do
+		addToggle(living, { key = item[1], label = item[2] }, UDim2.fromOffset(14 + (index - 1) * 112, 36), UDim2.fromOffset(104, 30))
+	end
+	addSlider(living, "ANIMATION SPEED", 14, 76, width, 0.2, 3,
+		function() return Config.animSpeed end, function(value) Config.animSpeed = value end, false,
+		function(value) return string.format("%.1fx", value) end)
+
+	-- Window lock and rainbow theme (rainbow is throttled because setHue repaints every themed widget).
+	local acc = 0
+	RunService.RenderStepped:Connect(function(dt)
+		if not root.Visible then return end
+		if Config.lockWindow then
+			lockedPosition = lockedPosition or root.Position
+			root.Position = lockedPosition
+		else
+			lockedPosition = nil
+		end
+		if not Config.rainbowTheme then return end
+		acc += dt
+		if acc < 0.07 then return end
+		setHue((Config.hue + acc * Config.rainbowSpeed) % 1)
+		acc = 0
+	end)
+	fitPage(page)
+end
+
+showTab("STATUS")
+
+--------------------------------------------------------------------------------
+-- Visibility
+--------------------------------------------------------------------------------
+
+local openButton = addButton(gui, {
+	Text = "MENU", TextSize = 12, Visible = false,
+	AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 10, 0.5, 0), Size = UDim2.fromOffset(56, 28),
+})
+
+local function setMenuVisible(visible)
+	root.Visible, openButton.Visible = visible, not visible
+end
+
+closeButton.Activated:Connect(function() setMenuVisible(false) end)
+openButton.Activated:Connect(function() setMenuVisible(true) end)
+
+--------------------------------------------------------------------------------
+-- Intro cinematic
+--------------------------------------------------------------------------------
+
+local function tween(object, duration, properties, style, direction)
+	local info = TweenInfo.new(duration, style or Enum.EasingStyle.Quad, direction or Enum.EasingDirection.Out)
+	local playing = TweenService:Create(object, info, properties)
+	playing:Play()
+	return playing
+end
+
+playIntro = function()
+	if introPlaying then return end
+	introPlaying = true
+	root.Visible, openButton.Visible = false, false
+
+	local PURPLE = Color3.fromHSV(0.76, 0.8, 1)
+	local DEEP = Color3.fromHSV(0.76, 0.9, 0.5)
+	local PALE = Color3.fromHSV(0.76, 0.12, 1)
+	local fixed = { accent = PURPLE, line = Color3.fromHSV(0.76, 0.4, 1), text = PALE, trim = GOLD }
+	local line = "THE SYSTEM HAS AWAKENED YOU"
+
+	local introGui = create("ScreenGui", {
+		Name = "FlightIntro", ResetOnSpawn = false, IgnoreGuiInset = true, DisplayOrder = 100,
+		ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+	}, playerGui)
+	local backdrop = create("Frame", {
+		Size = UDim2.fromScale(1, 1), BackgroundColor3 = Color3.fromHSV(0.76, 0.9, 0.03), BorderSizePixel = 0,
+	}, introGui)
+	local stage = create("Frame", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1 }, backdrop)
+	releaseKeyScreen()
+
+	local groups = {}
+	local function newGroup()
+		local group = create("CanvasGroup", {
+			Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, GroupTransparency = 1,
+		}, stage)
+		table.insert(groups, group)
+		return group
+	end
+
+	-- Rising shadow mist and embers.
+	local mistGroup = newGroup()
+	local wisps = {}
+	for index = 1, 26 do
+		local width = random:NextInteger(70, 170)
+		local frame = create("Frame", {
+			Size = UDim2.fromOffset(width, random:NextInteger(160, 340)),
+			BackgroundColor3 = index % 4 == 0 and PURPLE or DEEP, BorderSizePixel = 0,
+		}, mistGroup)
+		create("UIGradient", {
+			Rotation = 90,
+			Transparency = NumberSequence.new({
+				NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(0.5, 0.75), NumberSequenceKeypoint.new(1, 1),
+			}),
+		}, frame)
+		wisps[index] = {
+			frame = frame, width = width, x = random:NextNumber(), y = random:NextNumber() * 1.4 - 0.2,
+			speed = random:NextNumber(0.03, 0.08), sway = random:NextNumber(0.01, 0.04), phase = random:NextNumber() * math.pi * 2,
+		}
+	end
+	local embers = {}
+	for index = 1, 40 do
+		local size = random:NextInteger(2, 5)
+		local frame = create("Frame", {
+			Size = UDim2.fromOffset(size, size), BackgroundColor3 = index % 3 == 0 and PALE or PURPLE, BorderSizePixel = 0,
+		}, mistGroup)
+		embers[index] = {
+			frame = frame, x = random:NextNumber(), y = random:NextNumber(), speed = random:NextNumber(0.06, 0.18),
+			sway = random:NextNumber(0.005, 0.02), phase = random:NextNumber() * math.pi * 2,
+		}
+	end
+
+	-- Shooting stars across the whole screen.
+	local starGroup = newGroup()
+	local screen = workspace.CurrentCamera.ViewportSize
+	local introMeteors = makeMeteorField(starGroup, screen.X, screen.Y, 7, {
+		length = { 240, 460 }, speed = { 760, 1200 }, life = { 1, 1.6 }, interval = { 0.45, 1.1 },
+	}, { accent = Color3.fromHSV(0.64, 0.75, 1), line = Color3.fromHSV(0.58, 0.35, 1), text = Color3.new(1, 1, 1) })
+
+	local artGroup
+	if INTRO_IMAGE ~= "" then
+		artGroup = newGroup()
+		create("ImageLabel", {
+			AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromScale(0.6, 0.82),
+			BackgroundTransparency = 1, Image = INTRO_IMAGE, ScaleType = Enum.ScaleType.Fit, ImageTransparency = 0.1,
+		}, artGroup)
+	end
+
+	-- Glowing eyes.
+	local eyeGroup = newGroup()
+	addBloom(eyeGroup, UDim2.fromScale(0.5, 0.36), 380, 8, 0.93, PURPLE)
+	local eyes = {}
+	for side = -1, 1, 2 do
+		local eye = create("Frame", {
+			AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.new(0.5, side * 58, 0.36, 0),
+			Size = UDim2.fromOffset(56, 0), Rotation = -side * 12, BackgroundColor3 = PALE, BorderSizePixel = 0,
+		}, eyeGroup)
+		create("UIStroke", { Color = PURPLE, Thickness = 3, Transparency = 0.2 }, eye)
+		table.insert(eyes, eye)
+	end
+
+	-- Rotating sigil.
+	local sigilGroup = newGroup()
+	addBloom(sigilGroup, UDim2.fromScale(0.5, 0.5), 460, 8, 0.94, PURPLE)
+	local sigil = makeSigil(sigilGroup, 240, UDim2.fromScale(0.5, 0.5), fixed)
+
+	-- Light beam.
+	local beamGroup = newGroup()
+	local beam = create("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.fromScale(0.5, 0), Size = UDim2.new(0, 120, 0, 0),
+		BackgroundColor3 = PURPLE, BorderSizePixel = 0,
+	}, beamGroup)
+	create("UIGradient", {
+		Transparency = NumberSequence.new({
+			NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(0.5, 0.2), NumberSequenceKeypoint.new(1, 1),
+		}),
+	}, beam)
+	create("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.fromScale(0.5, 0), Size = UDim2.new(0, 8, 1, 0),
+		BackgroundColor3 = PALE, BorderSizePixel = 0,
+	}, beam)
+
+	-- System message, typed out.
+	local tagGroup = newGroup()
+	label(tagGroup, {
+		Text = "[ SYSTEM ]", TextSize = 16, Font = Fonts.bold, TextXAlignment = Enum.TextXAlignment.Center,
+		AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.74), Size = UDim2.fromOffset(400, 22),
+	}).TextColor3 = PURPLE
+	local typed = label(tagGroup, {
+		Text = line, TextSize = 22, Font = Fonts.bold, TextXAlignment = Enum.TextXAlignment.Center,
+		AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.79), Size = UDim2.fromOffset(700, 30),
+	})
+	typed.TextColor3 = PALE
+	typed.MaxVisibleGraphemes = 0
+
+	-- Title.
+	local titleGroup = newGroup()
+	local title = create("TextLabel", {
+		Text = "ARISE", Font = Fonts.black, TextSize = 112, TextColor3 = PALE, BackgroundTransparency = 1,
+		AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromScale(1, 0.3),
+	}, titleGroup)
+	create("UIStroke", { Color = PURPLE, Thickness = 4, Transparency = 0.1 }, title)
+	local titleScale = create("UIScale", { Scale = 1.6 }, title)
+
+	local flash = create("Frame", {
+		Size = UDim2.fromScale(1, 1), BackgroundColor3 = PALE, BackgroundTransparency = 1, BorderSizePixel = 0,
+	}, stage)
+
+	local topBar = create("Frame", { Size = UDim2.new(1, 0, 0, 0), BackgroundColor3 = Color3.new(0, 0, 0), BorderSizePixel = 0 }, introGui)
+	local bottomBar = create("Frame", {
+		AnchorPoint = Vector2.new(0, 1), Position = UDim2.fromScale(0, 1), Size = UDim2.new(1, 0, 0, 0),
+		BackgroundColor3 = Color3.new(0, 0, 0), BorderSizePixel = 0,
+	}, introGui)
+	create("TextLabel", {
+		Text = "CLICK OR PRESS ANY KEY TO SKIP", Font = Fonts.regular, TextSize = 12, TextColor3 = Color3.fromHSV(0.76, 0.3, 0.8),
+		TextTransparency = 0.3, BackgroundTransparency = 1, TextXAlignment = Enum.TextXAlignment.Right,
+		AnchorPoint = Vector2.new(1, 1), Position = UDim2.new(1, -18, 0.89, -10), Size = UDim2.fromOffset(300, 16),
+	}, introGui)
+
+	local skipped, clock, angle, spin, shakeUntil = false, 0, 0, 1, 0
+	local connection = RunService.RenderStepped:Connect(function(dt)
+		clock += dt
+		angle += dt * spin
+		for _, wisp in ipairs(wisps) do
+			wisp.y -= wisp.speed * dt
+			if wisp.y < -0.45 then wisp.y = 1.15 end
+			wisp.frame.Position = UDim2.new(wisp.x + math.sin(clock * 0.6 + wisp.phase) * wisp.sway, -wisp.width / 2, wisp.y, 0)
+		end
+		for _, ember in ipairs(embers) do
+			ember.y -= ember.speed * dt
+			if ember.y < -0.05 then ember.y = 1.05 end
+			ember.frame.Position = UDim2.fromScale(ember.x + math.sin(clock + ember.phase) * ember.sway, ember.y)
+			ember.frame.BackgroundTransparency = 0.25 + 0.5 * (0.5 + 0.5 * math.sin(clock * 3 + ember.phase))
+		end
+		sigil.update(angle)
+		introMeteors.update(dt)
+		if os.clock() < shakeUntil then
+			stage.Position = UDim2.fromOffset(random:NextInteger(-9, 9), random:NextInteger(-9, 9))
+		else
+			stage.Position = UDim2.fromOffset(0, 0)
+		end
+	end)
+	local skipConnection = UserInputService.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.Keyboard or isPress(input) then skipped = true end
+	end)
+
+	local music
+	if INTRO_MUSIC_ID ~= "" then
+		music = create("Sound", { Name = "IntroMusic", SoundId = INTRO_MUSIC_ID, Volume = 0, Looped = true }, SoundService)
+		music:Play()
+		tween(music, 2.5, { Volume = INTRO_MUSIC_VOLUME })
+	end
+
+	local function pause(seconds)
+		local waited = 0
+		while waited < seconds and not skipped do waited += task.wait() end
+	end
+
+	local function sequence()
+		tween(topBar, 0.9, { Size = UDim2.new(1, 0, 0.11, 0) })
+		tween(bottomBar, 0.9, { Size = UDim2.new(1, 0, 0.11, 0) })
+		tween(mistGroup, 1.6, { GroupTransparency = 0.1 })
+		tween(starGroup, 1.2, { GroupTransparency = 0 })
+		if artGroup then tween(artGroup, 2, { GroupTransparency = 0.15 }) end
+		pause(0.7)
+		if skipped then return end
+
+		tween(eyeGroup, 0.9, { GroupTransparency = 0 })
+		for _, eye in ipairs(eyes) do tween(eye, 0.7, { Size = UDim2.fromOffset(56, 8) }) end
+		pause(1)
+		if skipped then return end
+
+		tween(sigilGroup, 1.2, { GroupTransparency = 0 })
+		tween(sigil.holder, 1.6, { Size = UDim2.fromOffset(380, 380) }, Enum.EasingStyle.Quint)
+		pause(0.6)
+		if skipped then return end
+
+		tween(tagGroup, 0.5, { GroupTransparency = 0 })
+		for count = 1, #line do
+			if skipped then return end
+			typed.MaxVisibleGraphemes = count
+			task.wait(0.045)
+		end
+		pause(0.8)
+		if skipped then return end
+
+		tween(tagGroup, 0.4, { GroupTransparency = 1 })
+		pause(0.5)
+		if skipped then return end
+
+		spin, shakeUntil = 4, os.clock() + 0.45
+		introMeteors.burst(6)
+		tween(beamGroup, 0.1, { GroupTransparency = 0 })
+		tween(beam, 0.25, { Size = UDim2.new(0, 120, 1, 0) }, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+		flash.BackgroundTransparency = 0.15
+		tween(flash, 0.9, { BackgroundTransparency = 1 })
+		tween(titleGroup, 0.15, { GroupTransparency = 0 })
+		tween(titleScale, 0.5, { Scale = 1 }, Enum.EasingStyle.Back)
+		pause(0.4)
+		tween(beamGroup, 1.2, { GroupTransparency = 1 })
+		pause(1.5)
+	end
+
+	sequence()
+
+	rootScale.Scale = targetScale() * 0.9
+	setMenuVisible(true)
+	tween(rootScale, 0.9, { Scale = targetScale() }, Enum.EasingStyle.Back)
+	tween(backdrop, 0.9, { BackgroundTransparency = 1 })
+	for _, group in ipairs(groups) do tween(group, 0.8, { GroupTransparency = 1 }) end
+	tween(topBar, 0.7, { Size = UDim2.new(1, 0, 0, 0) })
+	tween(bottomBar, 0.7, { Size = UDim2.new(1, 0, 0, 0) })
+	if music then tween(music, 0.9, { Volume = 0 }) end
+	task.wait(1)
+	if music then music:Destroy() end
+
+	connection:Disconnect()
+	skipConnection:Disconnect()
+	introGui:Destroy()
+	introPlaying = false
+	notify("WELCOME, " .. string.upper(session.name))
+end
+
+--------------------------------------------------------------------------------
+-- Live readouts and input
+--------------------------------------------------------------------------------
+
+local function rankFor(speed)
+	for _, entry in ipairs(RANKS) do
+		if speed >= entry[1] then return entry[2] end
+	end
+	return "E"
+end
+
+local elapsed, fps, ping, pingClock, hintClock = 0, 60, 0, -1, -1
+local startClock = os.clock()
+
+RunService.RenderStepped:Connect(function(dt)
+	if not root.Visible then return end
+	elapsed += dt
+
+	sweepBar.Position = UDim2.new(0, ((elapsed * 0.3) % 1) * (WIN_W + 300) - 150, 1, -2)
+	for _, sigil in ipairs(sigils) do sigil.update(elapsed) end
+	updateParticles(dt, elapsed)
+	updateLiving(elapsed)
+	meteorLayer.Visible = Config.stars
+	meteorField.enabled = Config.stars
+	meteorField.update(dt)
+
+	local humanoid, rootPart = getParts()
+	local topSpeed = Config.flySpeed * Config.boost
+
+	ui.hero.Text = tostring(Config.flySpeed)
+	ui.heroSub.Text = string.format("BOOST x%d   |   TOP %d", Config.boost, topSpeed)
+	ui.mode.Text = Config.flying and "FLYING" or "GROUNDED"
+	ui.state.Text = humanoid and string.upper(humanoid:GetState().Name) or "NONE"
+	ui.rank.Text = rankFor(topSpeed)
+	ui.crest.update(elapsed, ui.rank.Text)
+
+	local health, maxHealth = humanoid and humanoid.Health or 0, humanoid and humanoid.MaxHealth or 1
+	ui.hpFill.Size = UDim2.fromScale(math.clamp(health / maxHealth, 0, 1), 1)
+	ui.hpValue.Text = string.format("%d / %d", math.floor(health), math.floor(maxHealth))
+
+	local speed = rootPart and rootPart.AssemblyLinearVelocity.Magnitude or 0
+	ui.velFill.Size = UDim2.fromScale(math.clamp(speed / math.max(topSpeed, 1), 0, 1), 1)
+	ui.velValue.Text = string.format("%d", math.floor(speed))
+
+	local position = rootPart and rootPart.Position or Vector3.zero
+	ui.alt.Text = string.format("%d", math.floor(position.Y))
+	ui.x.Text = string.format("%d", math.floor(position.X))
+	ui.y.Text = string.format("%d", math.floor(position.Y))
+	ui.z.Text = string.format("%d", math.floor(position.Z))
+	ui.top.Text = string.format("%d", topSpeed)
+
+	fps += (1 / math.max(dt, 0.001) - fps) * 0.1
+	ui.fps.Text = string.format("%d", math.floor(fps + 0.5))
+	if elapsed - pingClock > 0.5 then
+		pingClock = elapsed
+		local ok, seconds = pcall(function() return player:GetNetworkPing() end)
+		if ok and typeof(seconds) == "number" then ping = seconds * 1000 end
+	end
+	ui.ping.Text = string.format("%dms", math.floor(ping + 0.5))
+	local seconds = math.floor(os.clock() - startClock)
+	ui.time.Text = string.format("%02d:%02d", math.floor(seconds / 60) % 100, seconds % 60)
+
+	if elapsed - hintClock > 0.5 then
+		hintClock = elapsed
+		hintLabel.Text = string.format(
+			"WASD MOVE   |   %s / %s  UP / DOWN   |   SHIFT BOOST   |   %s FLY   |   %s MENU",
+			Config.upKey.Name, Config.downKey.Name, Config.flyKey.Name, Config.menuKey.Name
+		)
+	end
+end)
+
+UserInputService.InputBegan:Connect(function(input, processed)
+	if listening then
+		if input.UserInputType == Enum.UserInputType.Keyboard then
+			local callback = listening
+			listening = nil
+			callback(input.KeyCode ~= Enum.KeyCode.Escape and input.KeyCode or nil)
+		end
+		return
+	end
+	if introPlaying then return end
+
+	if input.KeyCode == Config.flyKey then
+		-- With ANTI OVERRIDE on, a game binding that "sinks" the key can't block the fly toggle.
+		if (not processed or Config.flyLocked) and not UserInputService:GetFocusedTextBox() then
+			setFlying(not Config.flying)
+		end
+	elseif not processed and input.KeyCode == Config.menuKey then
+		setMenuVisible(not root.Visible)
+	end
+end)
+
+player.CharacterAdded:Connect(function(character)
+	setFlying(false)
+	table.clear(noclipParts)
+	Config.freeze = false
+	Actions.viewing = nil
+	renderAll()
+	if statsModified then
+		character:WaitForChild("Humanoid")
+		applyHumanoidStats()
+	end
+end)
+
+--------------------------------------------------------------------------------
+-- Hotkeys and panic key
+--------------------------------------------------------------------------------
+
+do
+	local function flip(key, text)
+		local enabled = not Config[key]
+		Config[key] = enabled
+		if Handlers[key] then Handlers[key](enabled) end
+		if renderers[key] then renderers[key]() end
+		notify(text .. (enabled and " ON" or " OFF"))
+	end
+
+	UserInputService.InputBegan:Connect(function(input, processed)
+		if processed or introPlaying or listening then return end
+		local code = input.KeyCode
+		if code == Config.panicKey then
+			applyConfig({})
+			setFlying(false)
+			setMenuVisible(false)
+		elseif Config.hotkeys then
+			if code == Config.noclipKey then
+				flip("noclip", "NOCLIP")
+			elseif code == Config.fullbrightKey then
+				flip("fullbright", "FULLBRIGHT")
+			elseif code == Config.espKey then
+				flip("esp", "ESP")
+			end
+		end
+	end)
+end
+
+ready = true
+
+if INTRO_ENABLED then task.spawn(playIntro) else releaseKeyScreen() end
